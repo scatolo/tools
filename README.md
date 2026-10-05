@@ -56,18 +56,18 @@ Il risparmio dipende molto dal contenuto: scene scure, rumorose o molto dettagli
 
 | Componente | Obbligatorio per | Note |
 |---|---|---|
-| **Windows 10/11** | tutto | Lo script usa percorsi e GPU Windows |
-| **PowerShell 5.1 o superiore** | tutto | È già incluso in Windows; va bene anche PowerShell 7 |
+| **Windows 10/11** | script `.ps1` | Usa `dji-compress.ps1` con PowerShell 5.1+ |
+| **Linux (Fedora 44)** | script `.py` | Usa `dji-compress.py` con Python 3.9+ |
 | **ffmpeg + ffprobe** (build *full*) | video | Servono i componenti `libx265`, `libvmaf` e (per la GPU) `hevc_qsv` |
-| **GPU Intel con Quick Sync** + driver aggiornati | video su GPU | Opzionale: senza, lo script usa x265 su CPU (molto più lento) |
+| **GPU Intel con Quick Sync** + driver | video su GPU | Opzionale (ma consigliata). Su Windows usa D3D11, su Linux `/dev/dri/renderD128` |
 | **ImageMagick 7** (comando `magick`) | foto | Deve avere la metrica `SSIM` |
 | **exiftool** | opzionale | Rende molto più preciso il confronto dei metadati delle foto |
 
 Puoi usare solo la parte video o solo la parte foto: le funzioni che mancano di dipendenze si disattivano da sole.
 
-### 2.2 Installazione passo per passo
+### 2.2 Installazione (Windows)
 
-**Passo 1. Installa le dipendenze** (da PowerShell; se un ID non viene trovato, cerca con `winget search <nome>`):
+**Passo 1. Installa le dipendenze** (da PowerShell):
 
 ```powershell
 winget install Gyan.FFmpeg
@@ -75,36 +75,32 @@ winget install ImageMagick.ImageMagick
 winget install OliverBetz.ExifTool
 ```
 
-Chiudi e riapri il terminale, così il PATH si aggiorna. Durante l'installazione di ImageMagick lascia spuntata l'opzione che aggiunge `magick` al PATH.
+Durante l'installazione di ImageMagick lascia spuntata l'opzione per aggiungere `magick` al PATH.
 
-**Passo 2. Verifica che ci sia tutto.**
-
+**Passo 2. Avvia lo script.** 
+Metti `dji-compress.ps1` in una cartella, sbloccalo con `Unblock-File` se necessario, poi avvialo:
 ```powershell
-ffmpeg -hide_banner -encoders | Select-String "hevc_qsv|libx265"
-ffmpeg -hide_banner -filters  | Select-String "libvmaf"
-magick -version
-magick -list metric | Select-String "SSIM"
+powershell -ExecutionPolicy Bypass -File "dji-compress.ps1"
 ```
 
-Ti aspetti: una riga per `hevc_qsv` e una per `libx265`, una per `libvmaf`, la versione di ImageMagick (7.x) e la riga `SSIM`. Se ne manca una, quella funzione sarà disattivata (vedi [sezione 10](#10-risoluzione-dei-problemi)).
+> Se modifichi lo script PS1 a mano, salvalo come **UTF-8 con BOM** per preservare gli accenti su PowerShell 5.1.
 
-**Passo 3. Salva lo script.** Metti `dji-compress.ps1` in una cartella fissa (es. `C:\Tools\dji-compress\`). Accanto a lui verrà creato `dji-compress.config.json` con le tue impostazioni.
+### 2.3 Installazione (Linux - Fedora 44)
 
-**Passo 4. Sblocca il file** (necessario se l'hai scaricato da internet):
+**Passo 1. Installa i pacchetti tramite RPM Fusion** (serve per HEVC e libvmaf):
 
-```powershell
-Unblock-File "C:\Tools\dji-compress\dji-compress.ps1"
+```bash
+sudo dnf install https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-$(rpm -E %fedora).noarch.rpm
+sudo dnf install ffmpeg intel-media-driver ImageMagick perl-Image-ExifTool
 ```
+*Nota: `intel-media-driver` abilita il supporto Quick Sync (iHD) tramite VA-API per le iGPU Arrow Lake / Intel Arc 140T.*
 
-**Passo 5. Avvia.**
-
-```powershell
-powershell -ExecutionPolicy Bypass -File "C:\Tools\dji-compress\dji-compress.ps1"
+**Passo 2. Avvia lo script.**
+Avvia semplicemente la versione Python, che non ha dipendenze PIP esterne (usa solo librerie standard):
+```bash
+chmod +x dji-compress.py
+./dji-compress.py
 ```
-
-`-ExecutionPolicy Bypass` vale solo per questo avvio e non cambia le impostazioni di sicurezza del sistema.
-
-> Se modifichi lo script a mano, salvalo come **UTF-8 con BOM**: serve a PowerShell 5.1 per leggere correttamente gli accenti.
 
 ---
 
