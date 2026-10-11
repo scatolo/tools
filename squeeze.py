@@ -3,7 +3,7 @@
 
 """
 .SYNOPSIS
-    DJI Compress - ricompressione HEVC di video DJI con verifica qualita' (VMAF).
+    Squeeze - riduzione di video (HEVC), foto (JPEG) e audio (Opus) con verifica qualita'.
 
 .DESCRIPTION
     TUI testuale per:
@@ -15,17 +15,22 @@
       * gestire sia clip DJI sia Sony Alpha (audio PCM -> AAC per compatibilita' social,
         copia dei file XML/SRT affiancati, conversione 4:2:2 -> 4:2:0 quando serve)
       * comprimere le foto JPEG (Sony Alpha, ecc.) con ImageMagick, verificando SSIM e metadati
+      * convertire audio WAV/FLAC in Opus (>=128 kb/s), trasferendo i tag pari-pari (artisti
+        multipli come tag ARTIST separati) e salvando la copertina nella cartella "opus"
 
     Gli originali non vengono mai modificati ne' cancellati.
-    Requisiti: Linux (Fedora), python3, ffmpeg e ffprobe nel PATH (build "full" con libvmaf);
-    per le foto ImageMagick 7 (comando "magick"). exiftool e' opzionale (verifica metadati piu' precisa).
+    Requisiti: Linux (Fedora), python3, ffmpeg e ffprobe nel PATH (build "full" con libvmaf
+    e libopus); per le foto ImageMagick 7 (comando "magick"). exiftool e' opzionale (verifica metadati piu' precisa).
 """
+import csv
 import json
 import math
 import os
+import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
@@ -42,10 +47,11 @@ def print_color(text, color=RESET, end='\n'):
     print(f"{color}{text}{RESET}", end=end)
 
 script_dir = Path(__file__).resolve().parent
-config_path = script_dir / 'dji-compress.config.json'
+config_path = script_dir / 'squeeze.config.json'
+legacy_config_path = script_dir / 'dji-compress.config.json'
 
 # ----------------------------------------------------------------------------
-#  CONFIGURAZIONE (salvata in dji-compress.config.json accanto allo script)
+#  CONFIGURAZIONE (salvata in squeeze.config.json accanto allo script)
 # ----------------------------------------------------------------------------
 cfg = {
     'SourceDir': '',
@@ -71,20 +77,33 @@ cfg = {
     'PhotoProgressive': True,
     'PhotoVerify': True,
     'PhotoExtensions': ['.jpg', '.jpeg'],
-    'Extensions': ['.mp4', '.mov']
+    'Extensions': ['.mp4', '.mov'],
+    'OpusBitrate': 160,
+    'OpusCover': True,
+    'OpusExtensions': ['.wav', '.flac'],
+    'OpusCoverNames': ['cover', 'folder', 'front', 'album'],
+    'OpusCoverExts': ['.jpg', '.jpeg', '.png']
 }
 
 def import_config():
-    if not config_path.exists():
-        return
+    path = config_path
+    if not path.exists():
+        # migrazione automatica dal vecchio nome "dji-compress"
+        if legacy_config_path.exists():
+            path = legacy_config_path
+        else:
+            return
     try:
-        with open(config_path, 'r', encoding='utf-8') as f:
+        with open(path, 'r', encoding='utf-8') as f:
             loaded = json.load(f)
         for k, v in loaded.items():
             if k in cfg:
                 cfg[k] = v
     except Exception:
-        pass
+        return
+    # se ho letto il vecchio file, ne creo subito uno nuovo col nome corrente
+    if path != config_path:
+        save_config()
 
 def save_config():
     try:
@@ -124,6 +143,16 @@ def get_out_dir():
         return cfg['OutDir'].rstrip('/\\')
     return str(Path(cfg['SourceDir']) / 'out')
 
+def get_opus_dir():
+    return str(Path(cfg['SourceDir']) / 'opus')
+
+def is_under(path, directory):
+    if not directory:
+        return False
+    d = str(directory).rstrip('/\\') + os.sep
+    return str(path).startswith(d)
+
+
 def format_table(rows, columns):
     if not rows:
         return ""
@@ -147,6 +176,7 @@ def format_table(rows, columns):
 has_x265 = False
 has_vmaf = False
 qsv_works = False
+has_opus = False
 
 has_ffmpeg = False
 magick_exe = None
@@ -154,7 +184,7 @@ magick_ssim = False
 exiftool_exe = None
 
 def test_tools():
-    global has_ffmpeg, has_x265, has_vmaf, qsv_works, magick_exe, magick_ssim, exiftool_exe
+    global has_ffmpeg, has_x265, has_vmaf, qsv_works, has_opus, magick_exe, magick_ssim, exiftool_exe
     
     has_ffmpeg = bool(shutil.which('ffmpeg') and shutil.which('ffprobe'))
     magick_exe = shutil.which('magick')
@@ -172,6 +202,7 @@ def test_tools():
             flt = flt_res.stdout + flt_res.stderr
             has_x265 = 'libx265' in enc
             has_vmaf = 'libvmaf' in flt
+            has_opus = 'libopus' in enc
             
             if 'hevc_qsv' in enc:
                 qsv_cmd = ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'color=c=black:s=1280x720:d=0.2']
@@ -305,14 +336,20 @@ def get_media_files(kind='video'):
     if not src.is_dir():
         return []
     
-    out_dir = get_out_dir()
-    exts = [e.lower() for e in (cfg['PhotoExtensions'] if kind == 'photo' else cfg['Extensions'])]
+    if kind == 'photo':
+        exts = [e.lower() for e in cfg['PhotoExtensions']]
+    elif kind == 'audio':
+        exts = [e.lower() for e in cfg['OpusExtensions']]
+    else:
+        exts = [e.lower() for e in cfg['Extensions']]
+
+    exclude = [get_out_dir(), get_opus_dir()]
     
     files = []
     iterator = src.rglob('*') if cfg['Recurse'] else src.iterdir()
     for f in iterator:
         if f.is_file() and f.suffix.lower() in exts:
-            if not str(f).startswith(out_dir + os.sep) and not str(f).startswith(out_dir + '/'):
+            if not any(is_under(f, d) for d in exclude):
                 files.append(f)
     files.sort()
     return files
@@ -712,6 +749,376 @@ def invoke_photo_job(file_path, mode, src_root, out_root):
     return row
 
 # ----------------------------------------------------------------------------
+#  AUDIO (WAV/FLAC -> Opus) con trasferimento fedele dei tag e copertina
+# ----------------------------------------------------------------------------
+RIFF_INFO_MAP = {
+    'IART': 'ARTIST', 'INAM': 'TITLE', 'IPRD': 'ALBUM', 'ICRD': 'DATE', 'IGNR': 'GENRE',
+    'ITRK': 'TRACKNUMBER', 'ICOP': 'COPYRIGHT', 'ICMT': 'COMMENT', 'ISFT': 'ENCODER',
+    'IENG': 'ENGINEER', 'IWRI': 'WRITER', 'IMUS': 'COMPOSER', 'IALK': 'ALBUMARTIST',
+    'ILNG': 'LANGUAGE', 'IBPM': 'BPM', 'IKEY': 'KEY',
+}
+PICTURE_KEYS = {'METADATA_BLOCK_PICTURE', 'COVERART', 'COVERARTMIME'}
+
+def get_flac_comments(path):
+    comments = []
+    try:
+        data = open(path, 'rb').read()
+    except Exception:
+        return comments
+    if data[:4] != b'fLaC':
+        return comments
+    pos = 4
+    last = False
+    while not last and pos + 4 <= len(data):
+        h = data[pos]
+        last = bool(h & 0x80)
+        btype = h & 0x7f
+        length = int.from_bytes(data[pos + 1:pos + 4], 'big')
+        body_start = pos + 4
+        if btype == 4:
+            o = body_start
+            if o + 4 <= len(data):
+                vlen = int.from_bytes(data[o:o + 4], 'little')
+                o += 4 + vlen
+                if o + 4 <= len(data):
+                    n = int.from_bytes(data[o:o + 4], 'little')
+                    o += 4
+                    for _ in range(n):
+                        if o + 4 > len(data):
+                            break
+                        clen = int.from_bytes(data[o:o + 4], 'little')
+                        o += 4
+                        if o + clen > len(data):
+                            break
+                        comments.append(data[o:o + clen].decode('utf-8', 'replace'))
+                        o += clen
+        pos = body_start + length
+    return comments
+
+def get_riff_info_comments(path):
+    comments = []
+    try:
+        data = open(path, 'rb').read()
+    except Exception:
+        return comments
+    if data[:4] != b'RIFF' or data[8:12] != b'WAVE':
+        return comments
+    pos = 12
+    while pos + 8 <= len(data):
+        cid = data[pos:pos + 4]
+        size = int.from_bytes(data[pos + 4:pos + 8], 'little')
+        pos += 8
+        if cid == b'LIST' and data[pos:pos + 4] == b'INFO':
+            o = pos + 4
+            lim = min(pos + size, len(data))
+            while o + 8 <= lim:
+                sid = data[o:o + 4]
+                ssize = int.from_bytes(data[o + 4:o + 8], 'little')
+                o += 8
+                if o + ssize > len(data):
+                    break
+                val = data[o:o + ssize].decode('utf-8', 'replace').rstrip('\x00')
+                key = RIFF_INFO_MAP.get(sid.decode('ascii', 'replace'), sid.decode('ascii', 'replace').strip())
+                if val:
+                    comments.append(f"{key}={val}")
+                o += ssize + (ssize & 1)
+        pos += size + (size & 1)
+    return comments
+
+def get_ffprobe_comments(path):
+    comments = []
+    try:
+        res = subprocess.run(['ffprobe', '-v', 'error', '-show_entries', 'format_tags', '-of', 'json', path],
+                             capture_output=True, text=True)
+        o = json.loads(res.stdout)
+        tags = (o.get('format', {}) or {}).get('tags', {}) or {}
+        for k, v in tags.items():
+            comments.append(f"{k}={v}")
+    except Exception:
+        pass
+    return comments
+
+def get_source_comments(file_path):
+    p = Path(file_path)
+    ext = p.suffix.lower()
+    comments = []
+    if ext == '.flac':
+        comments = get_flac_comments(str(p))
+    elif ext == '.wav':
+        comments = get_riff_info_comments(str(p))
+    if not comments:
+        comments = get_ffprobe_comments(str(p))
+    return comments
+
+def get_opus_comments(comments):
+    out = []
+    for c in comments:
+        if '=' not in c:
+            continue
+        key, val = c.split('=', 1)
+        if key.upper() in PICTURE_KEYS:
+            continue
+        if key.upper() == 'ARTIST' and ';' in val:
+            for a in val.split(';'):
+                a = a.strip()
+                if a:
+                    out.append(f"{key}={a}")
+        else:
+            out.append(c)
+    return out
+
+def new_opus_tags_packet(vendor, comments):
+    out = bytearray(b'OpusTags')
+    out += len(vendor).to_bytes(4, 'little') + vendor
+    out += len(comments).to_bytes(4, 'little')
+    for c in comments:
+        cb = c.encode('utf-8')
+        out += len(cb).to_bytes(4, 'little') + cb
+    return bytes(out)
+
+def ogg_crc32(data, start=0, count=None):
+    if count is None:
+        count = len(data) - start
+    crc = 0
+    for i in range(start, start + count):
+        crc ^= (data[i] << 24)
+        for _ in range(8):
+            if crc & 0x80000000:
+                crc = ((crc << 1) ^ 0x04C11DB7) & 0xFFFFFFFF
+            else:
+                crc = (crc << 1) & 0xFFFFFFFF
+    return crc & 0xFFFFFFFF
+
+def read_ogg_pages(data):
+    pages = []
+    pos = 0
+    while pos + 27 <= len(data):
+        if data[pos:pos + 4] != b'OggS':
+            break
+        nseg = data[pos + 26]
+        if pos + 27 + nseg > len(data):
+            break
+        seg = list(data[pos + 27:pos + 27 + nseg])
+        body_len = sum(seg)
+        page_len = 27 + nseg + body_len
+        if pos + page_len > len(data):
+            break
+        pages.append({
+            'offset': pos, 'page_len': page_len, 'header_type': data[pos + 5],
+            'serial': int.from_bytes(data[pos + 14:pos + 18], 'little'),
+            'seq': int.from_bytes(data[pos + 18:pos + 22], 'little'),
+            'seg': seg, 'body_offset': pos + 27 + nseg, 'body_len': body_len,
+        })
+        pos += page_len
+    return pages
+
+def get_opus_tags_info(data, pages, idx):
+    buf = bytearray()
+    p = idx
+    done = False
+    while not done and p < len(pages):
+        pg = pages[p]
+        bo = pg['body_offset']
+        for v in pg['seg']:
+            buf += data[bo:bo + v]
+            bo += v
+            if v < 255:
+                done = True
+                break
+        p += 1
+    vlen = int.from_bytes(buf[8:12], 'little') if len(buf) >= 12 else 0
+    if vlen + 12 > len(buf):
+        vlen = 0
+    return {'vendor': bytes(buf[12:12 + vlen]), 'page_count': p - idx}
+
+def new_ogg_page_bytes(header_type, serial, seq, seg, body):
+    page = bytearray(27 + len(seg) + len(body))
+    page[0:4] = b'OggS'
+    page[4] = 0
+    page[5] = header_type
+    page[14:18] = serial.to_bytes(4, 'little')
+    page[18:22] = seq.to_bytes(4, 'little')
+    page[26] = len(seg)
+    page[27:27 + len(seg)] = bytes(seg)
+    page[27 + len(seg):27 + len(seg) + len(body)] = body
+    page[22:26] = ogg_crc32(page, 0, len(page)).to_bytes(4, 'little')
+    return bytes(page)
+
+def set_opus_tags(path, comments):
+    data = open(path, 'rb').read()
+    pages = read_ogg_pages(data)
+    idx = -1
+    for i, pg in enumerate(pages):
+        if pg['body_len'] >= 8 and data[pg['body_offset']:pg['body_offset'] + 8] == b'OpusTags':
+            idx = i
+            break
+    if idx < 0:
+        return False
+
+    info = get_opus_tags_info(data, pages, idx)
+    packet = new_opus_tags_packet(info['vendor'], comments)
+
+    lace = []
+    rem = len(packet)
+    while rem >= 255:
+        lace.append(255)
+        rem -= 255
+    lace.append(rem)
+
+    new_pages = []
+    seq = pages[idx]['seq']
+    off = 0
+    i2 = 0
+    first = True
+    while i2 < len(lace):
+        cnt = min(255, len(lace) - i2)
+        seg = lace[i2:i2 + cnt]
+        body_len = sum(seg)
+        body = packet[off:off + body_len]
+        ht = 0 if first else 1
+        new_pages.append(new_ogg_page_bytes(ht, pages[idx]['serial'], seq, seg, body))
+        off += body_len
+        i2 += cnt
+        seq += 1
+        first = False
+
+    delta = len(new_pages) - info['page_count']
+    out = bytearray()
+    i = 0
+    while i < len(pages):
+        if i == idx:
+            for np in new_pages:
+                out += np
+            i += info['page_count']
+            continue
+        pg = pages[i]
+        if i > idx and delta != 0:
+            page = bytearray(data[pg['offset']:pg['offset'] + pg['page_len']])
+            page[18:22] = (pg['seq'] + delta).to_bytes(4, 'little')
+            page[22:26] = b'\x00\x00\x00\x00'
+            page[22:26] = ogg_crc32(page, 0, len(page)).to_bytes(4, 'little')
+            out += page
+        else:
+            out += data[pg['offset']:pg['offset'] + pg['page_len']]
+        i += 1
+
+    with open(path, 'wb') as f:
+        f.write(out)
+    return True
+
+def extract_audio_cover(src, out_dir):
+    try:
+        res = subprocess.run(['ffprobe', '-v', 'error', '-select_streams', 'v',
+                              '-show_entries', 'stream=codec_name', '-of', 'json', src],
+                             capture_output=True, text=True)
+        o = json.loads(res.stdout)
+    except Exception:
+        return None
+    if not o or not o.get('streams'):
+        return None
+    codec = str(o['streams'][0].get('codec_name', ''))
+    ext = {'mjpeg': '.jpg', 'jpeg': '.jpg', 'png': '.png', 'webp': '.webp'}.get(codec, '.jpg')
+    dst = os.path.join(out_dir, 'cover' + ext)
+    try:
+        res = subprocess.run(['ffmpeg', '-hide_banner', '-loglevel', 'error', '-y', '-i', src,
+                              '-map', '0:v:0', '-c', 'copy', dst], capture_output=True, text=True)
+    except Exception:
+        return None
+    if res.returncode == 0 and os.path.exists(dst):
+        return dst
+    return None
+
+def test_cover_present(directory):
+    for n in cfg['OpusCoverNames']:
+        for e in cfg['OpusCoverExts']:
+            if os.path.exists(os.path.join(directory, n + e)):
+                return True
+    return os.path.exists(os.path.join(directory, 'cover.jpg')) or os.path.exists(os.path.join(directory, 'cover.png'))
+
+def set_audio_cover(file_path, dst):
+    out_dir = os.path.dirname(dst)
+    if test_cover_present(out_dir):
+        return 'presente'
+    src_dir = os.path.dirname(str(file_path))
+    for n in cfg['OpusCoverNames']:
+        for e in cfg['OpusCoverExts']:
+            p = os.path.join(src_dir, n + e)
+            if os.path.isfile(p):
+                shutil.copy2(p, os.path.join(out_dir, os.path.basename(p)))
+                return 'copiata'
+    if extract_audio_cover(str(file_path), out_dir):
+        return 'estratta'
+    return '-'
+
+def invoke_audio_job(file_path, src_root, out_root):
+    src_str = str(file_path)
+    rel = src_str[len(src_root):].lstrip('/\\')
+    dst = os.path.join(out_root, os.path.splitext(rel)[0] + '.opus')
+
+    f_stat = os.stat(src_str)
+    f_size = f_stat.st_size
+    row = {'File': rel, 'InMB': round(f_size / (1024 * 1024), 1), 'OutMB': None,
+           'Saved': None, 'Bitrate': cfg['OpusBitrate'], 'Tags': '-', 'Cover': '-', 'Status': ''}
+
+    if os.path.exists(dst) and not cfg['Overwrite']:
+        row['Status'] = 'ESISTENTE'
+        return row
+
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    comments = get_opus_comments(get_source_comments(src_str))
+
+    part = dst + '.part'
+    ff_args = ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-stats', '-y', '-i', src_str,
+               '-map', '0:a:0', '-vn', '-map_metadata', '-1',
+               '-c:a', 'libopus', '-b:a', f"{cfg['OpusBitrate']}k", '-vbr', 'on',
+               '-application', 'audio', '-f', 'opus', part]
+    try:
+        print_color(f"   encode Opus {cfg['OpusBitrate']}k ...", GRAY)
+        res = subprocess.run(ff_args)
+        if res.returncode != 0 or not os.path.exists(part):
+            row['Status'] = 'ERRORE ffmpeg'
+            return row
+        try:
+            if set_opus_tags(part, comments):
+                row['Tags'] = len(comments)
+            else:
+                row['Tags'] = 'non scritti'
+        except Exception:
+            row['Tags'] = 'non scritti'
+        os.replace(part, dst)
+    except KeyboardInterrupt:
+        if os.path.exists(part):
+            os.remove(part)
+        raise
+    finally:
+        if os.path.exists(part):
+            try:
+                os.remove(part)
+            except Exception:
+                pass
+
+    if cfg['OpusCover']:
+        row['Cover'] = set_audio_cover(file_path, dst)
+
+    if os.path.exists(dst):
+        out_len = os.path.getsize(dst)
+        row['OutMB'] = round(out_len / (1024 * 1024), 1)
+        row['Saved'] = round((1 - out_len / f_size) * 100, 0)
+        if out_len >= f_size:
+            os.remove(dst)
+            row['Status'] = 'SALTATO: output piu grande'
+            row['OutMB'] = None
+            row['Saved'] = None
+        else:
+            row['Status'] = 'OK'
+            if cfg['PreserveDates']:
+                try:
+                    os.utime(dst, (f_stat.st_atime, f_stat.st_mtime))
+                except Exception:
+                    pass
+    return row
+
+# ----------------------------------------------------------------------------
 #  BATCH & TUI
 # ----------------------------------------------------------------------------
 def clear_screen():
@@ -727,6 +1134,7 @@ def test_source():
 def start_batch(mode, kind='video'):
     if not test_source(): return
     is_photo = (kind == 'photo')
+    is_audio = (kind == 'audio')
     enc = None
 
     if is_photo:
@@ -736,6 +1144,15 @@ def start_batch(mode, kind='video'):
             return
         if mode == 'verify' and not magick_ssim:
             print_color("Questa build di ImageMagick non ha la metrica SSIM: verifica non disponibile.", RED)
+            wait_enter()
+            return
+    elif is_audio:
+        if not has_ffmpeg:
+            print_color("ffmpeg/ffprobe non trovati nel PATH: conversione audio non disponibile.", RED)
+            wait_enter()
+            return
+        if not has_opus:
+            print_color("Questa build di ffmpeg non include libopus: conversione audio non disponibile.", RED)
             wait_enter()
             return
     else:
@@ -756,12 +1173,13 @@ def start_batch(mode, kind='video'):
 
     files = get_media_files(kind)
     if not files:
-        print_color(f"Nessun file {'JPEG' if is_photo else 'video'} trovato.", YELLOW)
+        label = 'JPEG' if is_photo else ('audio (WAV/FLAC)' if is_audio else 'video')
+        print_color(f"Nessun file {label} trovato.", YELLOW)
         wait_enter()
         return
 
     src_root = cfg['SourceDir'].rstrip('/\\')
-    out_root = get_out_dir()
+    out_root = get_opus_dir() if is_audio else get_out_dir()
     total_bytes = sum(f.stat().st_size for f in files)
     total_mb = round(total_bytes / (1024*1024), 1)
 
@@ -773,6 +1191,11 @@ def start_batch(mode, kind='video'):
         print(f"JPEG              : qualita' {cfg['PhotoQuality']}, {'progressivo' if cfg['PhotoProgressive'] else 'baseline'}, croma e metadati dell'originale")
         if cfg['PhotoVerify']:
             print(f"Soglia SSIM       : {cfg['PhotoSsim']:.3f}")
+    elif is_audio:
+        print("Modalita'         : conversione audio -> Opus")
+        print(f"Opus              : {cfg['OpusBitrate']} kb/s VBR")
+        print("Metadati          : copiati pari-pari (artisti multipli come tag ARTIST separati)")
+        print(f"Copertina         : {'copiata/estratta nella cartella opus' if cfg['OpusCover'] else 'disattivata'}")
     else:
         modes_map = {'compress': 'solo compressione', 'full': 'compressione + verifica + retry', 'verify': 'solo verifica'}
         print(f"Modalita'         : {modes_map[mode]}")
@@ -803,6 +1226,8 @@ def start_batch(mode, kind='video'):
         print_color(f"[{i}/{len(files)}] {f.name}", CYAN)
         if is_photo:
             r = invoke_photo_job(f, mode, src_root, out_root)
+        elif is_audio:
+            r = invoke_audio_job(f, src_root, out_root)
         else:
             r = invoke_video_job(f, mode, enc, src_root, out_root)
         results.append(r)
@@ -815,15 +1240,24 @@ def start_batch(mode, kind='video'):
         else:
             color = YELLOW
             
-        m_txt = f"SSIM={r['SSIM']}  meta={r['Meta']}" if is_photo else f"VMAF={r['VMAF']}"
+        if is_photo:
+            m_txt = f"SSIM={r['SSIM']}  meta={r['Meta']}"
+        elif is_audio:
+            m_txt = f"tags={r['Tags']}  cover={r['Cover']}"
+        else:
+            m_txt = f"VMAF={r['VMAF']}"
         print_color(f"   -> {r['Status']}  {r['InMB']} -> {r['OutMB']} MB  (-{r['Saved']}%)  {m_txt}", color)
         
     elapsed = time.time() - start_t
 
     print()
     print_color('================ RIEPILOGO ================', CYAN)
-    cols = ['File', 'InMB', 'OutMB', 'Saved', 'Quality', 'SSIM', 'Meta', 'Status'] if is_photo else \
-           ['File', 'InMB', 'OutMB', 'Saved', 'Quality', 'VMAF', 'Audio', 'Status']
+    if is_photo:
+        cols = ['File', 'InMB', 'OutMB', 'Saved', 'Quality', 'SSIM', 'Meta', 'Status']
+    elif is_audio:
+        cols = ['File', 'InMB', 'OutMB', 'Saved', 'Bitrate', 'Tags', 'Cover', 'Status']
+    else:
+        cols = ['File', 'InMB', 'OutMB', 'Saved', 'Quality', 'VMAF', 'Audio', 'Status']
     print(format_table(results, cols))
 
     done = [r for r in results if r['OutMB'] is not None]
@@ -843,6 +1277,8 @@ def start_batch(mode, kind='video'):
             print_color(f"  - {b['File']}  [{b['Status']}]", YELLOW)
         if is_photo:
             print_color("Per i 'SOTTO SOGLIA': alza la qualita' foto in [6] (es. 93) o tieni l'originale.", YELLOW)
+        elif is_audio:
+            print_color("Per gli errori: controlla il file sorgente con [2] o l'installazione di ffmpeg/libopus.", YELLOW)
         else:
             print_color("Per i 'SOTTO SOGLIA': abbassa la qualita' numerica (es. 21) in [6] o tieni l'originale.", YELLOW)
 
@@ -946,7 +1382,7 @@ def show_photo_test():
             
     if not q_list:
         return
-    tmp = os.path.join(tempfile.gettempdir(), 'dji-compress-test')
+    tmp = os.path.join(tempfile.gettempdir(), 'squeeze-test')
     os.makedirs(tmp, exist_ok=True)
     
     rows = []
@@ -1011,6 +1447,8 @@ def show_settings_menu():
         print(f" [H] Soglia SSIM foto     : {cfg['PhotoSsim']:.3f}   (sotto la soglia la foto viene rifatta a Q piu' alta)")
         print(f" [I] JPEG progressivo     : {format_on_off(cfg['PhotoProgressive'])}")
         print(f" [J] Verifica foto        : {format_on_off(cfg['PhotoVerify'])}   (SSIM + confronto metadati)")
+        print(f" [K] Bitrate Opus         : {cfg['OpusBitrate']} kb/s   (VBR, minimo 128; audio WAV/FLAC -> Opus)")
+        print(f" [L] Copertina audio      : {format_on_off(cfg['OpusCover'])}   (copia/estrai cover nella cartella opus)")
         print(" [P] Preset rapidi (Sicuro / Archivio / Compatto)")
         print(" [0] Indietro")
         
@@ -1069,6 +1507,10 @@ def show_settings_menu():
             cfg['PhotoProgressive'] = not cfg['PhotoProgressive']
         elif c == 'J':
             cfg['PhotoVerify'] = not cfg['PhotoVerify']
+        elif c == 'K':
+            cfg['OpusBitrate'] = read_int_range('Bitrate Opus kb/s', cfg['OpusBitrate'], 128, 512)
+        elif c == 'L':
+            cfg['OpusCover'] = not cfg['OpusCover']
         elif c == 'P':
             print(" 1 = Sicuro   (QSV 21, x265 CRF 18, soglia 97 | foto Q93, SSIM 0.993)")
             print(" 2 = Archivio (QSV 24, x265 CRF 20, soglia 96 | foto Q90, SSIM 0.990)  <- consigliato")
@@ -1090,7 +1532,7 @@ def show_main_menu():
     while True:
         clear_screen()
         print_color('==============================================================', CYAN)
-        print_color("   DJI COMPRESS  -  HEVC + controllo qualita' VMAF", CYAN)
+        print_color("   SQUEEZE  -  video HEVC, foto JPEG, audio Opus", CYAN)
         print_color('==============================================================', CYAN)
         
         enc = resolve_encoder()
@@ -1116,8 +1558,15 @@ def show_main_menu():
             im_txt = "ImageMagick NON trovato (funzioni foto disattivate)"
             
         print(f" Foto     : {im_txt}")
+        if not has_ffmpeg:
+            audio_txt = 'ffmpeg non trovato'
+        elif not has_opus:
+            audio_txt = 'libopus NON disponibile'
+        else:
+            audio_txt = f"WAV/FLAC -> Opus {cfg['OpusBitrate']}k, cover {format_on_off(cfg['OpusCover'])}"
+        print(f" Audio    : {audio_txt}")
         print('--------------------------------------------------------------')
-        print(" [1] Scegli cartella (video e foto)")
+        print(" [1] Scegli cartella (video, foto e audio)")
         print(" [2] Analizza cartella (elenco video e foto)")
         print(" [3] Comprimi VIDEO")
         print(" [4] Comprimi VIDEO + verifica + ricodifica automatica   (consigliato)")
@@ -1126,6 +1575,7 @@ def show_main_menu():
         print(" [7] Comprimi FOTO JPEG (+ verifica SSIM e metadati + retry)")
         print(" [8] Solo verifica FOTO (output gia' presenti)")
         print(" [9] Test qualita' su una foto (confronto di piu' valori)")
+        print(" [10] Comprimi AUDIO (WAV/FLAC -> Opus)")
         print(" [0] Esci")
         
         c = input('Scelta: ').strip()
@@ -1147,6 +1597,8 @@ def show_main_menu():
             start_batch('verify', 'photo')
         elif c == '9':
             show_photo_test()
+        elif c == '10':
+            start_batch('compress', 'audio')
         elif c == '0':
             save_config()
             return

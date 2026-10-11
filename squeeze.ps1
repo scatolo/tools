@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-    DJI Compress - ricompressione HEVC di video DJI con verifica qualita' (VMAF).
+    Squeeze - riduzione di video (HEVC), foto (JPEG) e audio (Opus) con verifica qualita'.
 
 .DESCRIPTION
     TUI testuale per:
@@ -12,22 +12,25 @@
       * gestire sia clip DJI sia Sony Alpha (audio PCM -> AAC per compatibilita' social,
         copia dei file XML/SRT affiancati, conversione 4:2:2 -> 4:2:0 quando serve)
       * comprimere le foto JPEG (Sony Alpha, ecc.) con ImageMagick, verificando SSIM e metadati
+      * convertire audio WAV/FLAC in Opus (>=128 kb/s), trasferendo i tag pari-pari (artisti
+        multipli come tag ARTIST separati) e salvando la copertina nella cartella "opus"
 
     Gli originali non vengono mai modificati ne' cancellati.
-    Requisiti: Windows, PowerShell 5.1+, ffmpeg e ffprobe nel PATH (build "full" con libvmaf);
-    per le foto ImageMagick 7 (comando "magick"). exiftool e' opzionale (verifica metadati piu' precisa).
+    Requisiti: Windows, PowerShell 5.1+, ffmpeg e ffprobe nel PATH (build "full" con libvmaf
+    e libopus); per le foto ImageMagick 7 (comando "magick"). exiftool e' opzionale (verifica metadati piu' precisa).
 
 .EXAMPLE
-    powershell -ExecutionPolicy Bypass -File .\dji-compress.ps1
+    powershell -ExecutionPolicy Bypass -File .\squeeze.ps1
 #>
 
 $ErrorActionPreference = 'Continue'
 $script:Inv = [Globalization.CultureInfo]::InvariantCulture
 $scriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
-$script:ConfigPath = Join-Path $scriptDir 'dji-compress.config.json'
+$script:ConfigPath = Join-Path $scriptDir 'squeeze.config.json'
+$script:LegacyConfigPath = Join-Path $scriptDir 'dji-compress.config.json'
 
 # ----------------------------------------------------------------------------
-#  CONFIGURAZIONE (salvata in dji-compress.config.json accanto allo script)
+#  CONFIGURAZIONE (salvata in squeeze.config.json accanto allo script)
 # ----------------------------------------------------------------------------
 $script:Cfg = [ordered]@{
     SourceDir     = ''
@@ -54,16 +57,28 @@ $script:Cfg = [ordered]@{
     PhotoVerify   = $true         # verifica SSIM + confronto metadati dopo la compressione
     PhotoExtensions = @('.jpg', '.jpeg')
     Extensions    = @('.mp4', '.mov')
+    OpusBitrate   = 160           # kb/s (libopus VBR); minimo consentito 128
+    OpusCover     = $true         # copia/estrae la copertina nella cartella opus
+    OpusExtensions = @('.wav', '.flac')
+    OpusCoverNames = @('cover', 'folder', 'front', 'album')
+    OpusCoverExts  = @('.jpg', '.jpeg', '.png')
 }
 
 function Import-Config {
-    if (-not (Test-Path -LiteralPath $script:ConfigPath)) { return }
+    $path = $script:ConfigPath
+    if (-not (Test-Path -LiteralPath $path)) {
+        # migrazione automatica dal vecchio nome "dji-compress"
+        if (Test-Path -LiteralPath $script:LegacyConfigPath) { $path = $script:LegacyConfigPath }
+        else { return }
+    }
     try {
-        $loaded = Get-Content -LiteralPath $script:ConfigPath -Raw | ConvertFrom-Json
+        $loaded = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
         foreach ($p in $loaded.PSObject.Properties) {
             if ($script:Cfg.Contains($p.Name)) { $script:Cfg[$p.Name] = $p.Value }
         }
-    } catch { }
+    } catch { return }
+    # se ho letto il vecchio file, ne creo subito uno nuovo col nome corrente
+    if ($path -ne $script:ConfigPath) { Save-Config }
 }
 
 function Save-Config {
@@ -97,12 +112,24 @@ function Get-OutDir {
     return (Join-Path $script:Cfg.SourceDir 'out')
 }
 
+# Cartella di destinazione degli .opus: sempre <sorgente>\opus
+function Get-OpusDir {
+    return (Join-Path $script:Cfg.SourceDir 'opus')
+}
+
+function Test-UnderDir([string]$Path, [string]$Dir) {
+    if ([string]::IsNullOrEmpty($Dir) -or [string]::IsNullOrEmpty($Path)) { return $false }
+    $d = $Dir.TrimEnd('\', '/') + '\'
+    return $Path.StartsWith($d, [StringComparison]::OrdinalIgnoreCase)
+}
+
 # ----------------------------------------------------------------------------
 #  CONTROLLO STRUMENTI
 # ----------------------------------------------------------------------------
 $script:HasX265 = $false
 $script:HasVmaf = $false
 $script:QsvWorks = $false
+$script:HasOpus = $false
 
 $script:HasFfmpeg = $false
 $script:MagickExe = $null
@@ -130,6 +157,7 @@ function Test-Tools {
         $flt = (& ffmpeg -hide_banner -filters 2>&1 | Out-String)
         $script:HasX265 = $enc -match 'libx265'
         $script:HasVmaf = $flt -match 'libvmaf'
+        $script:HasOpus = $enc -match 'libopus'
         if ($enc -match 'hevc_qsv') {
             # prova reale: un encode minuscolo, perche' la build puo' avere QSV ma la GPU no
             & ffmpeg -hide_banner -loglevel error -f lavfi -i 'color=c=black:s=1280x720:d=0.2' -vf 'format=p010le' `
@@ -227,13 +255,19 @@ function Copy-Sidecars([IO.FileInfo]$File, [string]$DstDir) {
 }
 
 function Get-MediaFiles([string]$Kind = 'video') {
-    $out = Get-OutDir
     $p = @{ LiteralPath = $script:Cfg.SourceDir; File = $true; ErrorAction = 'SilentlyContinue' }
     if ($script:Cfg.Recurse) { $p.Recurse = $true }
-    $exts = if ($Kind -eq 'photo') { @($script:Cfg.PhotoExtensions) } else { @($script:Cfg.Extensions) }
+    $exts = switch ($Kind) {
+        'photo' { @($script:Cfg.PhotoExtensions) }
+        'audio' { @($script:Cfg.OpusExtensions) }
+        default { @($script:Cfg.Extensions) }
+    }
+    $excl = @((Get-OutDir), (Get-OpusDir))
     $files = Get-ChildItem @p | Where-Object {
-        ($exts -contains $_.Extension.ToLower()) -and
-        (-not $_.FullName.StartsWith($out + '\', [StringComparison]::OrdinalIgnoreCase))
+        $f = $_
+        if (-not ($exts -contains $f.Extension.ToLower())) { return $false }
+        foreach ($e in $excl) { if (Test-UnderDir $f.FullName $e) { return $false } }
+        return $true
     } | Sort-Object FullName
     return @($files)
 }
@@ -565,6 +599,373 @@ function Invoke-PhotoJob {
 }
 
 # ----------------------------------------------------------------------------
+#  AUDIO (WAV/FLAC -> Opus) con trasferimento fedele dei tag e copertina
+# ----------------------------------------------------------------------------
+$script:RiffInfoMap = @{
+    IART = 'ARTIST'; INAM = 'TITLE'; IPRD = 'ALBUM'; ICRD = 'DATE'; IGNR = 'GENRE'
+    ITRK = 'TRACKNUMBER'; ICOP = 'COPYRIGHT'; ICMT = 'COMMENT'; ISFT = 'ENCODER'
+    IENG = 'ENGINEER'; IWRI = 'WRITER'; IMUS = 'COMPOSER'; IALK = 'ALBUMARTIST'
+    ILNG = 'LANGUAGE'; IBPM = 'BPM'; IKEY = 'KEY'
+}
+
+# Legge i commenti Vorbis di un FLAC (tutti, duplicati inclusi), in ordine
+function Get-FlacComments([string]$Path) {
+    $b = [IO.File]::ReadAllBytes($Path)
+    $list = New-Object System.Collections.Generic.List[string]
+    if ($b.Length -lt 8) { return $list.ToArray() }
+    if (-not ($b[0] -eq 0x66 -and $b[1] -eq 0x4C -and $b[2] -eq 0x61 -and $b[3] -eq 0x43)) { return $list.ToArray() }
+    $pos = 4
+    $last = $false
+    while (-not $last -and $pos + 4 -le $b.Length) {
+        $h = $b[$pos]
+        $last = (($h -band 0x80) -ne 0)
+        $btype = $h -band 0x7F
+        $len = ([int]$b[$pos+1] -shl 16) -bor ([int]$b[$pos+2] -shl 8) -bor [int]$b[$pos+3]
+        $bodyStart = $pos + 4
+        if ($btype -eq 4) {
+            $o = $bodyStart
+            if ($o + 4 -le $b.Length) {
+                $vlen = [BitConverter]::ToUInt32($b, $o); $o += 4 + [int]$vlen
+                if ($o + 4 -le $b.Length) {
+                    $n = [BitConverter]::ToUInt32($b, $o); $o += 4
+                    for ($i = 0; $i -lt $n; $i++) {
+                        if ($o + 4 -gt $b.Length) { break }
+                        $clen = [BitConverter]::ToUInt32($b, $o); $o += 4
+                        if ($o + [int]$clen -gt $b.Length) { break }
+                        [void]$list.Add([Text.Encoding]::UTF8.GetString($b, $o, [int]$clen))
+                        $o += [int]$clen
+                    }
+                }
+            }
+        }
+        $pos = $bodyStart + $len
+    }
+    return $list.ToArray()
+}
+
+# Legge i tag RIFF INFO di un WAV, mappandoli sulle chiavi Vorbis standard
+function Get-RiffInfoComments([string]$Path) {
+    $b = [IO.File]::ReadAllBytes($Path)
+    $list = New-Object System.Collections.Generic.List[string]
+    if ($b.Length -lt 12) { return $list.ToArray() }
+    if (-not ($b[0] -eq 0x52 -and $b[1] -eq 0x49 -and $b[2] -eq 0x46 -and $b[3] -eq 0x46)) { return $list.ToArray() }
+    $pos = 12
+    while ($pos + 8 -le $b.Length) {
+        $id = [Text.Encoding]::ASCII.GetString($b, $pos, 4)
+        $size = [int][BitConverter]::ToUInt32($b, $pos + 4)
+        $pos += 8
+        if ($id -eq 'LIST' -and $pos + 4 -le $b.Length -and [Text.Encoding]::ASCII.GetString($b, $pos, 4) -eq 'INFO') {
+            $o = $pos + 4
+            $lim = [Math]::Min($pos + $size, $b.Length)
+            while ($o + 8 -le $lim) {
+                $sid = [Text.Encoding]::ASCII.GetString($b, $o, 4)
+                $ssize = [int][BitConverter]::ToUInt32($b, $o + 4)
+                $o += 8
+                if ($o + $ssize -gt $b.Length) { break }
+                $val = [Text.Encoding]::UTF8.GetString($b, $o, $ssize).TrimEnd([char]0)
+                $key = $script:RiffInfoMap[$sid]
+                if (-not $key) { $key = $sid.Trim() }
+                if ($val) { [void]$list.Add("${key}=${val}") }
+                $o += $ssize
+                if ($ssize % 2 -eq 1) { $o++ }
+            }
+        }
+        if ($size -lt 0) { break }
+        $pos += $size
+        if ($size % 2 -eq 1) { $pos++ }
+    }
+    return $list.ToArray()
+}
+
+function Get-FfprobeComments([string]$Path) {
+    $json = & ffprobe -v error -show_entries 'format_tags' -of json $Path 2>$null
+    $list = New-Object System.Collections.Generic.List[string]
+    try { $o = ($json -join "`n") | ConvertFrom-Json } catch { return $list.ToArray() }
+    if ($o -and $o.format -and $o.format.tags) {
+        foreach ($p in $o.format.tags.PSObject.Properties) { [void]$list.Add("$($p.Name)=$($p.Value)") }
+    }
+    return $list.ToArray()
+}
+
+# Commenti del file sorgente: parser nativo (fedele) e, solo se vuoto, fallback ffprobe
+function Get-SourceComments([IO.FileInfo]$File) {
+    $ext = $File.Extension.ToLower()
+    $c = @()
+    if ($ext -eq '.flac') { $c = @(Get-FlacComments $File.FullName) }
+    elseif ($ext -eq '.wav') { $c = @(Get-RiffInfoComments $File.FullName) }
+    if ($c.Count -eq 0) { $c = @(Get-FfprobeComments $File.FullName) }
+    return $c
+}
+
+# Prepara i commenti per Opus: scarta le copertine incorporate, divide gli artisti sul ';'
+function Get-OpusComments([string[]]$Comments) {
+    $out = New-Object System.Collections.Generic.List[string]
+    foreach ($c in $Comments) {
+        $ix = $c.IndexOf('=')
+        if ($ix -lt 0) { continue }
+        $key = $c.Substring(0, $ix)
+        $val = $c.Substring($ix + 1)
+        if ($key -match '^(?i)(METADATA_BLOCK_PICTURE|COVERART|COVERARTMIME)$') { continue }
+        if ($key -ieq 'ARTIST' -and $val.Contains(';')) {
+            foreach ($a in ($val -split ';')) {
+                $a = $a.Trim()
+                if ($a) { [void]$out.Add("${key}=${a}") }
+            }
+        } else {
+            [void]$out.Add($c)
+        }
+    }
+    return $out.ToArray()
+}
+
+# Costruisce il pacchetto Vorbis comment "OpusTags" (id venditore riusato + commenti)
+function New-OpusTagsPacket([byte[]]$Vendor, [string[]]$Comments) {
+    $ms = New-Object IO.MemoryStream
+    $wr = New-Object IO.BinaryWriter($ms)
+    try {
+        $wr.Write([Text.Encoding]::ASCII.GetBytes('OpusTags'))
+        $wr.Write([uint32]$Vendor.Length); $wr.Write($Vendor)
+        $wr.Write([uint32]@($Comments).Count)
+        foreach ($c in @($Comments)) {
+            $cb = [Text.Encoding]::UTF8.GetBytes($c)
+            $wr.Write([uint32]$cb.Length); $wr.Write($cb)
+        }
+        $wr.Flush()
+        return $ms.ToArray()
+    } finally { $wr.Dispose(); $ms.Dispose() }
+}
+
+# CRC-32 di Ogg: polinomio 0x04C11DB7, init 0, non riflesso, nessun xor finale
+function Get-OggCrc32([byte[]]$Data, [int]$Start, [int]$Count) {
+    [uint32]$crc = 0
+    $highBit = [uint32]2147483648     # 0x80000000 come uint32 (il literal andrebbe in Int32 negativo)
+    $poly = [uint32]79764919          # 0x04C11DB7
+    $end = $Start + $Count
+    for ($i = $Start; $i -lt $end; $i++) {
+        $crc = [uint32]((($crc -bxor ([uint32]([uint32]$Data[$i] -shl 24))) -band 4294967295))
+        for ($j = 0; $j -lt 8; $j++) {
+            if (($crc -band $highBit) -ne 0) {
+                $crc = [uint32](((($crc -shl 1) -band 4294967295)) -bxor $poly)
+            } else {
+                $crc = [uint32](($crc -shl 1) -band 4294967295)
+            }
+        }
+    }
+    return $crc
+}
+
+function Read-OggPages([byte[]]$Bytes) {
+    $list = New-Object System.Collections.Generic.List[object]
+    $pos = 0
+    while ($pos + 27 -le $Bytes.Length) {
+        if (-not ($Bytes[$pos] -eq 0x4F -and $Bytes[$pos+1] -eq 0x67 -and $Bytes[$pos+2] -eq 0x67 -and $Bytes[$pos+3] -eq 0x53)) { break }
+        $nseg = [int]$Bytes[$pos + 26]
+        if ($pos + 27 + $nseg -gt $Bytes.Length) { break }
+        $seg = New-Object 'System.Byte[]' $nseg
+        [Array]::Copy($Bytes, $pos + 27, $seg, 0, $nseg)
+        $bodyLen = 0
+        foreach ($s in $seg) { $bodyLen += [int]$s }
+        $pageLen = 27 + $nseg + $bodyLen
+        if ($pos + $pageLen -gt $Bytes.Length) { break }
+        [void]$list.Add([pscustomobject]@{
+            Offset = $pos; PageLength = $pageLen; HeaderType = [int]$Bytes[$pos + 5]
+            Serial = [BitConverter]::ToUInt32($Bytes, $pos + 14); Seq = [BitConverter]::ToUInt32($Bytes, $pos + 18)
+            NumSegments = $nseg; SegTable = $seg; BodyOffset = $pos + 27 + $nseg; BodyLength = $bodyLen
+        })
+        $pos += $pageLen
+    }
+    return , $list
+}
+
+# Dalla pagina del pacchetto OpusTags ricava il vendor e quante pagine occupa
+function Get-OpusTagsInfo([byte[]]$Bytes, $Pages, [int]$Idx) {
+    $buf = New-Object System.Collections.Generic.List[byte]
+    $p = $Idx; $done = $false
+    while (-not $done -and $p -lt $Pages.Count) {
+        $pg = $Pages[$p]; $bo = $pg.BodyOffset
+        foreach ($v in $pg.SegTable) {
+            for ($k = 0; $k -lt [int]$v; $k++) { [void]$buf.Add($Bytes[$bo]); $bo++ }
+            if ([int]$v -lt 255) { $done = $true; break }
+        }
+        $p++
+    }
+    $arr = $buf.ToArray()
+    $vlen = 0
+    if ($arr.Length -ge 12) { $vlen = [int][BitConverter]::ToUInt32($arr, 8) }
+    if ($vlen -lt 0 -or $vlen + 12 -gt $arr.Length) { $vlen = 0 }
+    $vendor = New-Object 'System.Byte[]' $vlen
+    if ($vlen -gt 0) { [Array]::Copy($arr, 12, $vendor, 0, $vlen) }
+    return [pscustomobject]@{ Vendor = $vendor; PageCount = ($p - $Idx) }
+}
+
+function New-OggPageBytes([int]$HeaderType, [uint32]$Serial, [uint32]$Seq, [byte[]]$Seg, [byte[]]$Body) {
+    $page = New-Object 'System.Byte[]' (27 + $Seg.Length + $Body.Length)
+    $page[0] = 0x4F; $page[1] = 0x67; $page[2] = 0x67; $page[3] = 0x53; $page[4] = 0
+    $page[5] = [byte]$HeaderType
+    [BitConverter]::GetBytes($Serial).CopyTo($page, 14)
+    [BitConverter]::GetBytes($Seq).CopyTo($page, 18)
+    $page[26] = [byte]$Seg.Length
+    [Array]::Copy($Seg, 0, $page, 27, $Seg.Length)
+    [Array]::Copy($Body, 0, $page, 27 + $Seg.Length, $Body.Length)
+    $crc = Get-OggCrc32 $page 0 $page.Length
+    [BitConverter]::GetBytes([uint32]$crc).CopyTo($page, 22)
+    return $page
+}
+
+# Riscrive i tag di un file Ogg Opus, sostituendo il pacchetto OpusTags
+function Set-OpusTags([string]$Path, [string[]]$Comments) {
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    $pages = Read-OggPages $bytes
+    $idx = -1
+    for ($i = 0; $i -lt $pages.Count; $i++) {
+        $pg = $pages[$i]
+        if ($pg.BodyLength -ge 8 -and [Text.Encoding]::ASCII.GetString($bytes, $pg.BodyOffset, 8) -eq 'OpusTags') { $idx = $i; break }
+    }
+    if ($idx -lt 0) { return $false }
+
+    $info = Get-OpusTagsInfo $bytes $pages $idx
+    $packet = New-OpusTagsPacket $info.Vendor $Comments
+
+    # lacing del pacchetto in segmenti da 255 byte
+    $lace = New-Object System.Collections.Generic.List[int]
+    $rem = $packet.Length
+    while ($rem -ge 255) { [void]$lace.Add(255); $rem -= 255 }
+    [void]$lace.Add($rem)
+
+    $newPages = New-Object System.Collections.Generic.List[byte[]]
+    $seq = [uint32]$pages[$idx].Seq
+    $off = 0; $i2 = 0; $first = $true
+    while ($i2 -lt $lace.Count) {
+        $cnt = [Math]::Min(255, $lace.Count - $i2)
+        $seg = New-Object 'System.Byte[]' $cnt
+        $bodyLen = 0
+        for ($k = 0; $k -lt $cnt; $k++) { $seg[$k] = [byte]$lace[$i2 + $k]; $bodyLen += $lace[$i2 + $k] }
+        $body = New-Object 'System.Byte[]' $bodyLen
+        [Array]::Copy($packet, $off, $body, 0, $bodyLen)
+        $ht = if ($first) { 0 } else { 1 }
+        [void]$newPages.Add((New-OggPageBytes $ht $pages[$idx].Serial $seq $seg $body))
+        $off += $bodyLen; $i2 += $cnt; $seq++; $first = $false
+    }
+
+    $delta = $newPages.Count - $info.PageCount
+    $ms = New-Object IO.MemoryStream
+    try {
+        for ($i = 0; $i -lt $pages.Count; $i++) {
+            if ($i -eq $idx) {
+                foreach ($np in $newPages) { $ms.Write($np, 0, $np.Length) }
+                $i += ($info.PageCount - 1)
+                continue
+            }
+            $pg = $pages[$i]
+            if ($i -gt $idx -and $delta -ne 0) {
+                $copy = New-Object 'System.Byte[]' $pg.PageLength
+                [Array]::Copy($bytes, $pg.Offset, $copy, 0, $pg.PageLength)
+                [BitConverter]::GetBytes([uint32]($pg.Seq + $delta)).CopyTo($copy, 18)
+                $copy[22] = 0; $copy[23] = 0; $copy[24] = 0; $copy[25] = 0
+                [BitConverter]::GetBytes([uint32](Get-OggCrc32 $copy 0 $copy.Length)).CopyTo($copy, 22)
+                $ms.Write($copy, 0, $copy.Length)
+            } else {
+                $ms.Write($bytes, $pg.Offset, $pg.PageLength)
+            }
+        }
+        [IO.File]::WriteAllBytes($Path, $ms.ToArray())
+        return $true
+    } finally { $ms.Dispose() }
+}
+
+# Estrae la copertina incorporata (FLAC picture) dal file sorgente
+function Extract-AudioCover([string]$Src, [string]$OutDir) {
+    $json = & ffprobe -v error -select_streams v -show_entries 'stream=codec_name' -of json $Src 2>$null
+    try { $o = ($json -join "`n") | ConvertFrom-Json } catch { return $null }
+    if (-not $o -or -not $o.streams -or @($o.streams).Count -eq 0) { return $null }
+    $codec = "$(@($o.streams)[0].codec_name)"
+    $ext = switch ($codec) { 'mjpeg' { '.jpg' } 'jpeg' { '.jpg' } 'png' { '.png' } 'webp' { '.webp' } default { '.jpg' } }
+    $dst = Join-Path $OutDir ('cover' + $ext)
+    & ffmpeg -hide_banner -loglevel error -y -i $Src -map 0:v:0 -c copy $dst 2>$null
+    if ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $dst)) { return $dst }
+    return $null
+}
+
+# True se nella cartella esiste gia' un file copertina (nomi/estensioni configurati o cover.*)
+function Test-CoverPresent([string]$Dir) {
+    foreach ($n in @($script:Cfg.OpusCoverNames)) {
+        foreach ($e in @($script:Cfg.OpusCoverExts)) {
+            if (Test-Path -LiteralPath (Join-Path $Dir ($n + $e))) { return $true }
+        }
+    }
+    if ((Test-Path -LiteralPath (Join-Path $Dir 'cover.jpg')) -or (Test-Path -LiteralPath (Join-Path $Dir 'cover.png'))) { return $true }
+    return $false
+}
+
+# Copia la copertina affiancata (cover/folder/front/album) o, se assente, la estrae dal file
+function Set-AudioCover([IO.FileInfo]$File, [string]$Dst) {
+    $outDir = Split-Path $Dst
+    if (Test-CoverPresent $outDir) { return 'presente' }
+    foreach ($n in @($script:Cfg.OpusCoverNames)) {
+        foreach ($e in @($script:Cfg.OpusCoverExts)) {
+            $p = Join-Path $File.DirectoryName ($n + $e)
+            if (Test-Path -LiteralPath $p -PathType Leaf) {
+                Copy-Item -LiteralPath $p -Destination (Join-Path $outDir (Split-Path $p -Leaf))
+                return 'copiata'
+            }
+        }
+    }
+    if (Extract-AudioCover $File.FullName $outDir) { return 'estratta' }
+    return '-'
+}
+
+function Invoke-AudioJob {
+    param([IO.FileInfo]$File, [string]$SrcRoot, [string]$OutRoot)
+
+    $rel = $File.FullName.Substring($SrcRoot.Length).TrimStart('\', '/')
+    $dst = Join-Path $OutRoot ([IO.Path]::ChangeExtension($rel, '.opus'))
+    $row = [ordered]@{ File = $rel; InMB = [math]::Round($File.Length / 1MB, 1); OutMB = $null
+                       Saved = $null; Bitrate = $script:Cfg.OpusBitrate; Tags = '-'; Cover = '-'; Status = '' }
+
+    if ((Test-Path -LiteralPath $dst) -and -not $script:Cfg.Overwrite) { $row.Status = 'ESISTENTE'; return [pscustomobject]$row }
+
+    New-Item -ItemType Directory -Force -Path (Split-Path $dst) | Out-Null
+    $comments = @(Get-OpusComments (Get-SourceComments $File))
+
+    $part = "$dst.part"
+    $ffArgs = @('-hide_banner', '-loglevel', 'error', '-stats', '-y', '-i', $File.FullName,
+                '-map', '0:a:0', '-vn', '-map_metadata', '-1',
+                '-c:a', 'libopus', '-b:a', "$($script:Cfg.OpusBitrate)k", '-vbr', 'on',
+                '-application', 'audio', '-f', 'opus', $part)
+    try {
+        Write-Host ("   encode Opus {0}k ..." -f $script:Cfg.OpusBitrate) -ForegroundColor DarkGray
+        & ffmpeg @ffArgs
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $part)) { $row.Status = 'ERRORE ffmpeg'; return [pscustomobject]$row }
+        try {
+            if (Set-OpusTags $part $comments) { $row.Tags = @($comments).Count } else { $row.Tags = 'non scritti' }
+        } catch { $row.Tags = 'non scritti' }
+        Move-Item -LiteralPath $part -Destination $dst -Force
+    } finally {
+        if (Test-Path -LiteralPath $part) { Remove-Item -LiteralPath $part -Force -ErrorAction SilentlyContinue }
+    }
+
+    if ($script:Cfg.OpusCover) { $row.Cover = Set-AudioCover $File $dst }
+
+    if (Test-Path -LiteralPath $dst) {
+        $outLen = (Get-Item -LiteralPath $dst).Length
+        $row.OutMB = [math]::Round($outLen / 1MB, 1)
+        $row.Saved = [math]::Round((1 - $outLen / $File.Length) * 100, 0)
+        if ($outLen -ge $File.Length) {
+            Remove-Item -LiteralPath $dst -Force
+            $row.Status = 'SALTATO: output piu grande'; $row.OutMB = $null; $row.Saved = $null
+        } else {
+            $row.Status = 'OK'
+            if ($script:Cfg.PreserveDates) {
+                $o = Get-Item -LiteralPath $dst
+                $o.CreationTime = $File.CreationTime
+                $o.LastWriteTime = $File.LastWriteTime
+            }
+        }
+    }
+    return [pscustomobject]$row
+}
+
+# ----------------------------------------------------------------------------
 #  BATCH
 # ----------------------------------------------------------------------------
 function Test-Source {
@@ -579,6 +980,7 @@ function Test-Source {
 function Start-Batch([string]$Mode, [string]$Kind = 'video') {
     if (-not (Test-Source)) { return }
     $isPhoto = ($Kind -eq 'photo')
+    $isAudio = ($Kind -eq 'audio')
     $enc = $null
 
     if ($isPhoto) {
@@ -588,6 +990,15 @@ function Start-Batch([string]$Mode, [string]$Kind = 'video') {
         }
         if ($Mode -eq 'verify' -and -not $script:MagickSsim) {
             Write-Host 'Questa build di ImageMagick non ha la metrica SSIM: verifica non disponibile.' -ForegroundColor Red
+            Wait-Enter; return
+        }
+    } elseif ($isAudio) {
+        if (-not $script:HasFfmpeg) {
+            Write-Host 'ffmpeg/ffprobe non trovati nel PATH: conversione audio non disponibile.' -ForegroundColor Red
+            Wait-Enter; return
+        }
+        if (-not $script:HasOpus) {
+            Write-Host 'Questa build di ffmpeg non include libopus: conversione audio non disponibile.' -ForegroundColor Red
             Wait-Enter; return
         }
     } else {
@@ -610,12 +1021,13 @@ function Start-Batch([string]$Mode, [string]$Kind = 'video') {
 
     $files = Get-MediaFiles $Kind
     if ($files.Count -eq 0) {
-        Write-Host ("Nessun file {0} trovato." -f $(if ($isPhoto) { 'JPEG' } else { 'video' })) -ForegroundColor Yellow
+        $kindLabel = if ($isPhoto) { 'JPEG' } elseif ($isAudio) { 'audio (WAV/FLAC)' } else { 'video' }
+        Write-Host ("Nessun file {0} trovato." -f $kindLabel) -ForegroundColor Yellow
         Wait-Enter; return
     }
 
     $srcRoot = $script:Cfg.SourceDir.TrimEnd('\', '/')
-    $outRoot = Get-OutDir
+    $outRoot = if ($isAudio) { Get-OpusDir } else { Get-OutDir }
     $totalMB = [math]::Round((($files | Measure-Object Length -Sum).Sum) / 1MB, 1)
 
     Write-Host ''
@@ -624,6 +1036,11 @@ function Start-Batch([string]$Mode, [string]$Kind = 'video') {
         Write-Host ("Modalita'         : {0}" -f $(if ($Mode -eq 'verify') { 'solo verifica foto' } else { 'compressione foto' + $(if ($script:Cfg.PhotoVerify) { ' + verifica + retry' } else { ' (senza verifica)' }) }))
         Write-Host ("JPEG              : qualita' {0}, {1}, croma e metadati dell'originale" -f $script:Cfg.PhotoQuality, $(if ($script:Cfg.PhotoProgressive) { 'progressivo' } else { 'baseline' }))
         if ($script:Cfg.PhotoVerify) { Write-Host ("Soglia SSIM       : {0}" -f ([double]$script:Cfg.PhotoSsim).ToString('0.000', $script:Inv)) }
+    } elseif ($isAudio) {
+        Write-Host  "Modalita'         : conversione audio -> Opus"
+        Write-Host ("Opus              : {0} kb/s VBR" -f $script:Cfg.OpusBitrate)
+        Write-Host  "Metadati          : copiati pari-pari (artisti multipli come tag ARTIST separati)"
+        Write-Host ("Copertina         : {0}" -f $(if ($script:Cfg.OpusCover) { 'copiata/estratta nella cartella opus' } else { 'disattivata' }))
     } else {
         Write-Host ("Modalita'         : {0}" -f @{ compress = 'solo compressione'; full = 'compressione + verifica + retry'; verify = 'solo verifica' }[$Mode])
         if ($enc) {
@@ -652,10 +1069,11 @@ function Start-Batch([string]$Mode, [string]$Kind = 'video') {
         Write-Host ''
         Write-Host ("[{0}/{1}] {2}" -f $i, $files.Count, $f.Name) -ForegroundColor Cyan
         $r = if ($isPhoto) { Invoke-PhotoJob -File $f -Mode $Mode -SrcRoot $srcRoot -OutRoot $outRoot }
+             elseif ($isAudio) { Invoke-AudioJob -File $f -SrcRoot $srcRoot -OutRoot $outRoot }
              else          { Invoke-VideoJob -File $f -Mode $Mode -Enc $enc -SrcRoot $srcRoot -OutRoot $outRoot }
         $results.Add($r)
         $color = switch -Wildcard ($r.Status) { 'OK' { 'Green' } 'COMPRESS*' { 'Green' } 'ESISTENTE' { 'DarkGray' } 'GIA*' { 'DarkGray' } default { 'Yellow' } }
-        $mTxt = if ($isPhoto) { "SSIM=$($r.SSIM)  meta=$($r.Meta)" } else { "VMAF=$($r.VMAF)" }
+        $mTxt = if ($isPhoto) { "SSIM=$($r.SSIM)  meta=$($r.Meta)" } elseif ($isAudio) { "tags=$($r.Tags)  cover=$($r.Cover)" } else { "VMAF=$($r.VMAF)" }
         Write-Host ("   -> {0}  {1} -> {2} MB  (-{3}%)  {4}" -f $r.Status, $r.InMB, $r.OutMB, $r.Saved, $mTxt) -ForegroundColor $color
     }
     $sw.Stop()
@@ -664,6 +1082,7 @@ function Start-Batch([string]$Mode, [string]$Kind = 'video') {
     Write-Host ''
     Write-Host '================ RIEPILOGO ================' -ForegroundColor Cyan
     $cols = if ($isPhoto) { 'File', 'InMB', 'OutMB', 'Saved', 'Quality', 'SSIM', 'Meta', 'Status' }
+            elseif ($isAudio) { 'File', 'InMB', 'OutMB', 'Saved', 'Bitrate', 'Tags', 'Cover', 'Status' }
             else          { 'File', 'InMB', 'OutMB', 'Saved', 'Quality', 'VMAF', 'Audio', 'Status' }
     ($results | Format-Table -Property $cols -AutoSize | Out-String -Width 220).TrimEnd() | Write-Host
 
@@ -678,6 +1097,7 @@ function Start-Batch([string]$Mode, [string]$Kind = 'video') {
         Write-Host ("`nDA CONTROLLARE ({0}):" -f $bad.Count) -ForegroundColor Yellow
         $bad | ForEach-Object { Write-Host ("  - {0}  [{1}]" -f $_.File, $_.Status) -ForegroundColor Yellow }
         if ($isPhoto) { Write-Host "Per i 'SOTTO SOGLIA': alza la qualita' foto in [6] (es. 93) o tieni l'originale." -ForegroundColor Yellow }
+        elseif ($isAudio) { Write-Host "Per gli errori: controlla il file sorgente con [2] o l'installazione di ffmpeg/libopus." -ForegroundColor Yellow }
         else          { Write-Host "Per i 'SOTTO SOGLIA': abbassa la qualita' numerica (es. 21) in [6] o tieni l'originale." -ForegroundColor Yellow }
     }
     $log = Join-Path $outRoot ("log_{0}_{1}.csv" -f $Kind, (Get-Date -Format 'yyyyMMdd_HHmmss'))
@@ -750,7 +1170,7 @@ function Show-PhotoTest {
     }
     if ($list.Count -eq 0) { return }
 
-    $tmp = Join-Path ([IO.Path]::GetTempPath()) 'dji-compress-test'
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) 'squeeze-test'
     New-Item -ItemType Directory -Force -Path $tmp | Out-Null
     $rows = foreach ($q in $list) {
         $o = Join-Path $tmp ("q{0}.jpg" -f $q)
@@ -814,6 +1234,8 @@ function Show-SettingsMenu {
         Write-Host (" [H] Soglia SSIM foto     : {0}   (sotto la soglia la foto viene rifatta a Q piu' alta)" -f ([double]$script:Cfg.PhotoSsim).ToString('0.000', $script:Inv))
         Write-Host (" [I] JPEG progressivo     : {0}" -f (Format-OnOff $script:Cfg.PhotoProgressive))
         Write-Host (" [J] Verifica foto        : {0}   (SSIM + confronto metadati)" -f (Format-OnOff $script:Cfg.PhotoVerify))
+        Write-Host (" [K] Bitrate Opus         : {0} kb/s   (VBR, minimo 128; audio WAV/FLAC -> Opus)" -f $script:Cfg.OpusBitrate)
+        Write-Host (" [L] Copertina audio      : {0}   (copia/estrai cover nella cartella opus)" -f (Format-OnOff $script:Cfg.OpusCover))
         Write-Host ' [P] Preset rapidi (Sicuro / Archivio / Compatto)'
         Write-Host ' [0] Indietro'
         $c = (Read-Host 'Scelta').Trim().ToUpper()
@@ -851,6 +1273,8 @@ function Show-SettingsMenu {
             }
             'I' { $script:Cfg.PhotoProgressive = -not $script:Cfg.PhotoProgressive }
             'J' { $script:Cfg.PhotoVerify = -not $script:Cfg.PhotoVerify }
+            'K' { $script:Cfg.OpusBitrate = Read-IntRange 'Bitrate Opus kb/s' $script:Cfg.OpusBitrate 128 512 }
+            'L' { $script:Cfg.OpusCover = -not $script:Cfg.OpusCover }
             'P' {
                 Write-Host ' 1 = Sicuro   (QSV 21, x265 CRF 18, soglia 97 | foto Q93, SSIM 0.993)'
                 Write-Host ' 2 = Archivio (QSV 24, x265 CRF 20, soglia 96 | foto Q90, SSIM 0.990)  <- consigliato'
@@ -871,7 +1295,7 @@ function Show-MainMenu {
     while ($true) {
         Clear-Host
         Write-Host '==============================================================' -ForegroundColor Cyan
-        Write-Host '   DJI COMPRESS  -  HEVC + controllo qualita'' VMAF' -ForegroundColor Cyan
+        Write-Host '   SQUEEZE  -  video HEVC, foto JPEG, audio Opus' -ForegroundColor Cyan
         Write-Host '==============================================================' -ForegroundColor Cyan
         $enc = Resolve-Encoder
         $encTxt = switch ($enc) {
@@ -887,8 +1311,12 @@ function Show-MainMenu {
             $(if (-not $script:MagickSsim) { ' (SSIM non disponibile!)' } else { '' }) + $(if ($script:ExifTool) { ', exiftool' } else { '' })
         } else { 'ImageMagick NON trovato (funzioni foto disattivate)' }
         Write-Host (" Foto     : {0}" -f $imTxt)
+        $audioTxt = if (-not $script:HasFfmpeg) { 'ffmpeg non trovato' }
+                    elseif (-not $script:HasOpus) { 'libopus NON disponibile' }
+                    else { "WAV/FLAC -> Opus $($script:Cfg.OpusBitrate)k, cover " + (Format-OnOff $script:Cfg.OpusCover) }
+        Write-Host (" Audio    : {0}" -f $audioTxt)
         Write-Host '--------------------------------------------------------------'
-        Write-Host ' [1] Scegli cartella (video e foto)'
+        Write-Host ' [1] Scegli cartella (video, foto e audio)'
         Write-Host ' [2] Analizza cartella (elenco video e foto)'
         Write-Host ' [3] Comprimi VIDEO'
         Write-Host ' [4] Comprimi VIDEO + verifica + ricodifica automatica   (consigliato)'
@@ -897,6 +1325,7 @@ function Show-MainMenu {
         Write-Host ' [7] Comprimi FOTO JPEG (+ verifica SSIM e metadati + retry)'
         Write-Host ' [8] Solo verifica FOTO (output gia'' presenti)'
         Write-Host ' [9] Test qualita'' su una foto (confronto di piu'' valori)'
+        Write-Host ' [10] Comprimi AUDIO (WAV/FLAC -> Opus)'
         Write-Host ' [0] Esci'
         switch ((Read-Host 'Scelta').Trim()) {
             '1' { Select-Folder }
@@ -908,6 +1337,7 @@ function Show-MainMenu {
             '7' { Start-Batch 'full' 'photo' }
             '8' { Start-Batch 'verify' 'photo' }
             '9' { Show-PhotoTest }
+            '10' { Start-Batch 'compress' 'audio' }
             '0' { Save-Config; return }
         }
     }

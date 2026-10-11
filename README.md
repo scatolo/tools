@@ -1,8 +1,8 @@
-# DJI Compress: documentazione
+# Squeeze: documentazione
 
-Strumento da terminale (PowerShell) per **ridurre le dimensioni di video e foto** di fotocamere come DJI Osmo Action e Sony Alpha, **senza differenze visibili rispetto all'originale** e conservando i metadati che le librerie permettono di conservare.
+Strumento da terminale (PowerShell su Windows, Python su Linux) per **ridurre le dimensioni di video, foto e audio** di fotocamere come DJI Osmo Action e Sony Alpha, **senza differenze visibili rispetto all'originale** e conservando i metadati che le librerie permettono di conservare.
 
-Documento riferito a `dji-compress.ps1` (versione con video DJI/Sony e foto JPEG), aggiornato al 5 ottobre 2026.
+Documento riferito a `squeeze.ps1` e `squeeze.py` (video DJI/Sony, foto JPEG e conversione audio WAV/FLAC in Opus), aggiornato al 11 ottobre 2026.
 
 ## Indice
 
@@ -31,10 +31,11 @@ Documento riferito a `dji-compress.ps1` (versione con video DJI/Sony e foto JPEG
 |---|---|---|
 | **Video** (`.mp4`, `.mov`) | Ricodificati in HEVC (H.265) con la GPU Intel (Quick Sync) o con la CPU (x265). Risoluzione e fps restano uguali. | **VMAF** (0-100) confrontando output e originale |
 | **Foto** (`.jpg`, `.jpeg`) | Ricodificate come JPEG a qualità inferiore, stessa risoluzione e stesso sottocampionamento del colore. | **SSIM** (0-1) + confronto dei metadati |
+| **Audio** (`.wav`, `.flac`) | Convertiti in **Opus** (>=128 kb/s, VBR), con tutti i tag copiati. Gli artisti multipli restano tag separati. | Nessuna misura: Opus a bitrate scelto è trasparente |
 
 ### Principi di funzionamento
 
-- **Gli originali non vengono mai modificati né cancellati.** Tutto va in una cartella `out` separata.
+- **Gli originali non vengono mai modificati né cancellati.** Video e foto vanno in una cartella `out`, l'audio in una cartella `opus` (entrambe accanto alla sorgente).
 - **La qualità viene misurata, non presunta.** Se un file scende sotto la soglia, viene ricodificato in automatico a qualità più alta.
 - **Niente file a metà.** Ogni file viene scritto con estensione `.part` e rinominato solo a lavoro finito.
 - **È riprendibile.** Se interrompi e rilanci, i file già pronti in `out` non vengono rifatti.
@@ -56,14 +57,14 @@ Il risparmio dipende molto dal contenuto: scene scure, rumorose o molto dettagli
 
 | Componente | Obbligatorio per | Note |
 |---|---|---|
-| **Windows 10/11** | script `.ps1` | Usa `dji-compress.ps1` con PowerShell 5.1+ |
-| **Linux (Fedora 44)** | script `.py` | Usa `dji-compress.py` con Python 3.9+ |
-| **ffmpeg + ffprobe** (build *full*) | video | Servono i componenti `libx265`, `libvmaf` e (per la GPU) `hevc_qsv` |
+| **Windows 10/11** | script `.ps1` | Usa `squeeze.ps1` con PowerShell 5.1+ |
+| **Linux (Fedora 44)** | script `.py` | Usa `squeeze.py` con Python 3.9+ |
+| **ffmpeg + ffprobe** (build *full*) | video e audio | Servono i componenti `libx265`, `libvmaf`, `libopus` e (per la GPU) `hevc_qsv` |
 | **GPU Intel con Quick Sync** + driver | video su GPU | Opzionale (ma consigliata). Su Windows usa D3D11, su Linux `/dev/dri/renderD128` |
 | **ImageMagick 7** (comando `magick`) | foto | Deve avere la metrica `SSIM` |
 | **exiftool** | opzionale | Rende molto più preciso il confronto dei metadati delle foto |
 
-Puoi usare solo la parte video o solo la parte foto: le funzioni che mancano di dipendenze si disattivano da sole.
+Puoi usare solo la parte video, solo la parte foto o solo la parte audio: le funzioni che mancano di dipendenze si disattivano da sole.
 
 ### 2.2 Installazione (Windows)
 
@@ -78,9 +79,9 @@ winget install OliverBetz.ExifTool
 Durante l'installazione di ImageMagick lascia spuntata l'opzione per aggiungere `magick` al PATH.
 
 **Passo 2. Avvia lo script.** 
-Metti `dji-compress.ps1` in una cartella, sbloccalo con `Unblock-File` se necessario, poi avvialo:
+Metti `squeeze.ps1` in una cartella, sbloccalo con `Unblock-File` se necessario, poi avvialo:
 ```powershell
-powershell -ExecutionPolicy Bypass -File "dji-compress.ps1"
+powershell -ExecutionPolicy Bypass -File "squeeze.ps1"
 ```
 
 > Se modifichi lo script PS1 a mano, salvalo come **UTF-8 con BOM** per preservare gli accenti su PowerShell 5.1.
@@ -98,8 +99,8 @@ sudo dnf install ffmpeg intel-media-driver ImageMagick perl-Image-ExifTool
 **Passo 2. Avvia lo script.**
 Avvia semplicemente la versione Python, che non ha dipendenze PIP esterne (usa solo librerie standard):
 ```bash
-chmod +x dji-compress.py
-./dji-compress.py
+chmod +x squeeze.py
+./squeeze.py
 ```
 
 ---
@@ -123,7 +124,7 @@ Workflow consigliato, la prima volta che usi lo strumento su una nuova fotocamer
 ## 4. Il menu, voce per voce
 
 ```
-[1] Scegli cartella (video e foto)
+[1] Scegli cartella (video, foto e audio)
 [2] Analizza cartella (elenco video e foto)
 [3] Comprimi VIDEO
 [4] Comprimi VIDEO + verifica + ricodifica automatica   (consigliato)
@@ -132,6 +133,7 @@ Workflow consigliato, la prima volta che usi lo strumento su una nuova fotocamer
 [7] Comprimi FOTO JPEG (+ verifica SSIM e metadati + retry)
 [8] Solo verifica FOTO (output già presenti)
 [9] Test qualità su una foto (confronto di più valori)
+[10] Comprimi AUDIO (WAV/FLAC -> Opus)
 [0] Esci
 ```
 
@@ -146,6 +148,7 @@ Workflow consigliato, la prima volta che usi lo strumento su una nuova fotocamer
 | **7** | Comprime le foto JPEG, poi SSIM + metadati + retry. | Salta le foto già compresse almeno quanto il target. |
 | **8** | Verifica SSIM e metadati di output foto già esistenti. | |
 | **9** | Comprime **una** foto a più qualità e mostra dimensione, SSIM e metadati. | Usa una cartella temporanea che viene poi cancellata. Non scrive in `out`. |
+| **10** | Converte i file **WAV/FLAC** in **Opus** nella cartella `opus`, copiando i tag e la copertina. | Vedi [7.3](#73-audio-wavflac--opus). |
 | **0** | Salva la configurazione ed esce. | |
 
 Prima di ogni lotto lo script mostra un riepilogo (numero file, encoder, qualità, cartella di output) e chiede **conferma** (`s`/`n`).
@@ -177,6 +180,8 @@ Prima di ogni lotto lo script mostra un riepilogo (numero file, encoder, qualit�
 | `H` | Soglia SSIM foto | 0.990 | 0.95-0.9999 | Sotto, la foto viene rifatta a Q più alta |
 | `I` | JPEG progressivo | SI | SI/NO | File un po' più piccoli; compatibile con i browser e i social |
 | `J` | Verifica foto | SI | SI/NO | SSIM + confronto metadati |
+| `K` | Bitrate Opus | 160 | 128-512 kb/s | Bitrate medio VBR della conversione audio (`[10]`) |
+| `L` | Copertina audio | SI | SI/NO | Copia/estrae la copertina nella cartella `opus` |
 | `P` | Preset rapidi | | | Vedi sotto |
 
 ### 5.2 Preset rapidi (`P`)
@@ -189,7 +194,7 @@ Prima di ogni lotto lo script mostra un riepilogo (numero file, encoder, qualit�
 
 I preset non toccano le altre impostazioni (audio, sottocartelle, ecc.).
 
-### 5.3 File `dji-compress.config.json`
+### 5.3 File `squeeze.config.json`
 
 Viene creato accanto allo script e riscritto a ogni modifica. Puoi editarlo a mano (con lo script chiuso). Chiavi e valori di default:
 
@@ -218,11 +223,18 @@ Viene creato accanto allo script e riscritto a ogni modifica. Puoi editarlo a ma
   "PhotoProgressive": true,
   "PhotoVerify": true,
   "PhotoExtensions": [".jpg", ".jpeg"],
-  "Extensions": [".mp4", ".mov"]
+  "Extensions": [".mp4", ".mov"],
+  "OpusBitrate": 160,
+  "OpusCover": true,
+  "OpusExtensions": [".wav", ".flac"],
+  "OpusCoverNames": ["cover", "folder", "front", "album"],
+  "OpusCoverExts": [".jpg", ".jpeg", ".png"]
 }
 ```
 
-`Extensions`, `PhotoExtensions` e `SidecarExts` si cambiano solo da qui. Per tornare ai default, elimina il file.
+`Extensions`, `PhotoExtensions`, `SidecarExts`, `OpusExtensions`, `OpusCoverNames` e `OpusCoverExts` si cambiano solo da qui. Per tornare ai default, elimina il file.
+
+> **Migrazione dal vecchio nome.** Se accanto allo script esiste ancora `dji-compress.config.json` e non esiste `squeeze.config.json`, le impostazioni vengono lette dal vecchio file e riscritte automaticamente come `squeeze.config.json`.
 
 ---
 
@@ -307,16 +319,41 @@ Se ti servono i dati giroscopio (per Gyroflow) o i metadati Sony per un clip, **
 | **Anteprima MPF** (immagine 1920x1080 incorporata dalle Sony) | **Persa** |
 | MakerNote Sony | Non verificato su file reali Sony: guarda la colonna *Metadati* nel test `[9]` |
 
+### 7.3 Audio (WAV/FLAC → Opus)
+
+La voce `[10]` converte i file **WAV** e **FLAC** in **Opus** (contenitore Ogg, codec `libopus`), scrivendo nella cartella `<sorgente>\opus` (con sottocartelle replicate se *Includi sottocartelle* è attivo). L'audio è sempre ricodificato; il bitrate medio è quello scelto in `[6]` → `K` (default 160 kb/s, minimo 128), in modalità VBR.
+
+**Metadati.** I tag vengono letti direttamente dal file sorgente e riscritti pari-pari nell'Opus:
+
+| Elemento | Esito |
+|---|---|
+| Tag FLAC (commenti Vorbis: `TITLE`, `ALBUM`, `DATE`, `GENRE`, `TRACKNUMBER`, ecc.) | Copiati identici (nome e valore) |
+| Tag WAV (chunk RIFF `LIST/INFO`: `IART`, `INAM`, `IPRD`, ...) | Copiati con il nome Vorbis standard (`ARTIST`, `TITLE`, `ALBUM`, ...) |
+| **Artisti multipli** (più commenti `ARTIST`) | Conservati come **tag `ARTIST` separati** |
+| **`ARTIST` unico con `;`** (es. `A; B`) | Diviso in più tag `ARTIST` separati |
+| Copertina incorporata (`METADATA_BLOCK_PICTURE`/`COVERART`) | **Non** incorporata nell'Opus: salvata come file (vedi sotto) |
+| Ordine e duplicati degli altri tag | Preservati |
+
+> **Perché non basta ffmpeg da solo:** ffmpeg unisce più tag `ARTIST` in un unico campo `A;B` e non sa scrivere tag duplicati. Per questo lo script riscrive a mano l'header dei commenti Ogg dell'Opus (ricalcolando i CRC delle pagine), così gli artisti restano separati.
+
+**Copertina.** Opus non incorpora in modo affidabile le copertine, quindi (con `L` attivo) lo script, per ogni cartella elaborata:
+
+1. cerca un file immagine nella cartella sorgente con nome `cover`, `folder`, `front` o `album` e estensione `.jpg`/`.jpeg`/`.png`, e lo copia nella cartella di destinazione `opus` mantenendo il nome;
+2. se non lo trova, **estrae** la copertina incorporata da uno dei file FLAC della cartella e la salva come `cover.jpg` (o `.png`);
+3. se non trova nulla, non crea nessun file.
+
+Se nella cartella `opus` esiste già una copertina, non viene sovrascritta.
+
 ---
 
 ## 8. Output, log e stati
 
 ### 8.1 Dove finiscono i file
 
-- Cartella di output: `<sorgente>\out` (cambiabile con `B`).
-- Con **sottocartelle** attive, la struttura viene replicata in `out`.
-- I file nella cartella di output **non** vengono rielaborati.
-- Nomi e estensioni restano gli stessi.
+- Cartella di output: `<sorgente>\out` (cambiabile con `B`); l'**audio** va sempre in `<sorgente>\opus`.
+- Con **sottocartelle** attive, la struttura viene replicata in `out` (e in `opus`).
+- I file nella cartella di output **non** vengono rielaborati (né quelli in `opus`).
+- Nomi e estensioni restano gli stessi (per l'audio il nome resta, l'estensione diventa `.opus`).
 
 ### 8.2 Log CSV
 
@@ -324,8 +361,9 @@ A fine lotto viene creato in `out\`:
 
 - `log_video_AAAAMMGG_HHMMSS.csv`
 - `log_photo_AAAAMMGG_HHMMSS.csv`
+- `log_audio_AAAAMMGG_HHMMSS.csv`
 
-Colonne video: `File, InMB, OutMB, Saved, Quality, VMAF, Audio, Status`. Colonne foto: `File, InMB, OutMB, Saved, Quality, SSIM, Meta, Status`. `Saved` è la percentuale risparmiata.
+Colonne video: `File, InMB, OutMB, Saved, Quality, VMAF, Audio, Status`. Colonne foto: `File, InMB, OutMB, Saved, Quality, SSIM, Meta, Status`. Colonne audio: `File, InMB, OutMB, Saved, Bitrate, Tags, Cover, Status`. `Saved` è la percentuale risparmiata; `Tags` è il numero di tag scritti, `Cover` l'esito della copertina (`copiata`/`estratta`/`presente`/`-`).
 
 ### 8.3 Stati
 
@@ -345,6 +383,8 @@ Colonne video: `File, InMB, OutMB, Saved, Quality, VMAF, Audio, Status`. Colonne
 
 Nelle modalità `[4]` e `[7]`, un output **già presente** non viene ricodificato ma viene **verificato**; il retry parte solo per i file codificati in quella esecuzione.
 
+La conversione audio `[10]` non ha verifica di qualità: gli stati sono `OK`, `ESISTENTE` (file già in `opus`, salvo `Sovrascrivi`), `SALTATO: output piu grande` (Opus più grande della sorgente, es. FLAC molto comprimibile) e `ERRORE ffmpeg`.
+
 ---
 
 ## 9. Documentazione tecnica
@@ -361,6 +401,7 @@ Un solo file `.ps1`, organizzato in sezioni:
 | Analisi | `Get-VideoInfo`, `Get-ColorArgs`, `Test-AudioToAac`, `Get-MediaFiles`, `Copy-Sidecars` |
 | Video | `Invoke-Encode`, `Measure-Vmaf`, `Invoke-VideoJob` |
 | Foto | `Get-PhotoInfo`, `Invoke-PhotoEncode`, `Measure-Ssim`, `Test-PhotoMetadata`, `Invoke-PhotoJob` |
+| Audio | `Get-FlacComments`, `Get-RiffInfoComments`, `Get-OpusComments`, `Set-OpusTags`, `Set-AudioCover`, `Invoke-AudioJob` |
 | Lotti e TUI | `Start-Batch`, `Show-Scan`, `Show-PhotoTest`, `Select-Folder`, `Show-SettingsMenu`, `Show-MainMenu` |
 
 ### 9.2 Rilevamento degli strumenti (`Test-Tools`)
@@ -453,14 +494,41 @@ magick INPUT.JPG -quality 90 -sampling-factor 2x1 -interlace JPEG `
 
 **Nota sull'output di SSIM:** le versioni recenti di ImageMagick 7 stampano `<valore> (<distanza>)`, dove la distanza è `(1 - SSIM) / 2` (0 = identico). Lo script la converte con `SSIM = 1 - 2 × distanza`. Se la tua versione stampa un solo numero, lo usa direttamente come SSIM.
 
-### 9.6 Sicurezza dei dati
+### 9.6 Pipeline audio (`Invoke-AudioJob`)
+
+1. **Lettura dei tag** dal file sorgente, senza passare dal dizionario di ffmpeg:
+   - **FLAC**: parsing del blocco `VORBIS_COMMENT` (vendor + elenco commenti), che conserva ordine e duplicati;
+   - **WAV**: parsing dei chunk `RIFF`, in particolare `LIST`→`INFO`, con mappatura delle chiavi 4 caratteri su quelle Vorbis (`IART`→`ARTIST`, `INAM`→`TITLE`, ...);
+   - fallback: se il parsing nativo non trova nulla, si usano i tag letti da `ffprobe`.
+2. **Normalizzazione artisti** (`Get-OpusComments`): scarta i tag copertina e divide un singolo `ARTIST` che contiene `;` in più tag `ARTIST` separati.
+3. **Codifica**:
+
+```powershell
+ffmpeg -hide_banner -loglevel error -stats -y -i INPUT.FLAC `
+  -map 0:a:0 -vn -map_metadata -1 `
+  -c:a libopus -b:a 160k -vbr on -application audio -f opus OUTPUT.OPUS.part
+```
+
+   - `-vn` esclude eventuali copertine incorporate; `-map_metadata -1` scrive l'Opus **senza** tag (li mettiamo noi al passo successivo).
+4. **Scrittura dei tag** (`Set-OpusTags`): si legge il pacchetto `OpusTags` generato da ffmpeg (riusandone l'id venditore), si costruisce il nuovo pacchetto Vorbis comment con i nostri tag e si **sostituisce la pagina Ogg** corrispondente, ricalcolando lacing, numeri di sequenza e **CRC-32** delle pagine (polinomio `0x04C11DB7`, come da specifica Ogg). Se il pacchetto cresce oltre una pagina, le pagine successive vengono rinumerate.
+
+   Questo è ciò che permette i tag `ARTIST` multipli, cosa che ffmpeg da solo non fa.
+5. **Copertina** (`Set-AudioCover`): copia il file affiancato (`cover`/`folder`/`front`/`album`) oppure estrae la picture incorporata con:
+
+```powershell
+ffmpeg -hide_banner -loglevel error -y -i INPUT.FLAC -map 0:v:0 -c copy cover.jpg
+```
+
+6. **Dimensioni e date**: se l'Opus risulta più grande della sorgente viene scartato; con *Conserva date* le date del file vengono copiate.
+
+### 9.7 Sicurezza dei dati
 
 - **Mai scritture sugli originali.** L'unica cosa che lo script cancella è un proprio output scartato o un `.part` interrotto.
 - **File parziali:** scrittura su `.part` + `finally` che lo rimuove in caso di errore o Ctrl+C. Nessun file a metà viene scambiato per completo.
 - **Output più grande dell'originale:** eliminato.
 - **Prima sovrascrittura:** solo se l'opzione `Sovrascrivi` è attiva.
 
-### 9.7 Note sull'implementazione
+### 9.8 Note sull'implementazione
 
 - `$ErrorActionPreference = 'Continue'`: con `Stop`, PowerShell 5.1 trasforma l'output su stderr dei programmi nativi in errori bloccanti.
 - Tutte le tabelle usano `Out-String -Width 220`: senza, in alcuni terminali risultavano vuote.
@@ -491,6 +559,11 @@ magick INPUT.JPG -quality 90 -sampling-factor 2x1 -interlace JPEG `
 | Tabelle vuote o storte | Terminale senza larghezza | Allarga la finestra; lo script usa già una larghezza fissa |
 | Errore con file dal nome strano | Caratteri speciali nel nome | Rinominalo; `[ ]` finali nel nome file confondono ImageMagick |
 | Output già presente non viene rifatto | Comportamento previsto | Attiva `Sovrascrivi` (`9`) oppure cancella l'output |
+| Audio: `libopus NON disponibile` | Build ffmpeg senza `libopus` | Installa una build *full* (gyan.dev o `Gyan.FFmpeg`) |
+| Audio: `SALTATO: output piu grande` | FLAC molto comprimibile (es. toni/rumore) | Normale: tieni il FLAC, oppure abbassa il bitrate in `K` |
+| Audio: gli artisti restano uniti | Il tag non usa `;` né più commenti `ARTIST` | La divisione avviene solo su `;`: sistema i tag alla fonte |
+| Audio: copertina assente nell'`opus` | Nessun file affiancato né picture nel FLAC | Aggiungi `cover.jpg` nella cartella sorgente, oppure attiva `L` |
+| Audio: `Tags: non scritti` | Scrittura dei commenti Ogg fallita | Il file resta valido ma senza tag: controlla la build di ffmpeg |
 
 ---
 
@@ -505,6 +578,12 @@ magick INPUT.JPG -quality 90 -sampling-factor 2x1 -interlace JPEG `
 - **La compressione JPEG→JPEG è sempre con perdita.** Qui è controllata, ma non è lossless.
 - **Un processo alla volta.** Non c'è parallelismo tra file (la GPU lavora, poi la CPU calcola VMAF/SSIM).
 - **Le metriche non sono onniscienti** (vedi [6.3](#63-limiti-delle-metriche)).
+- **Audio: la conversione è con perdita.** Da WAV/FLAC a Opus il contenuto cambia (a 128+ kb/s è di norma trasparente, ma non è lossless).
+- **Audio: solo WAV e FLAC in ingresso.** Non vengono toccati MP3, M4A, OGG, Opus, ecc.
+- **WAV: metadati limitati.** Si leggono solo i chunk `RIFF/INFO` (con fallback `ffprobe`); eventuali tag ID3v2 dentro il WAV non sono gestiti e il WAV non ha un concetto di artisti multipli.
+- **La copertina non viene incorporata nell'Opus** (di proposito): resta un file immagine nella cartella `opus`.
+- **La divisione degli artisti avviene solo sul `;`** o da più commenti `ARTIST`; non vengono interpretati altri separatori (`&`, `,`, `feat.`).
+- **Audio senza verifica di qualità:** non esiste una metrica equivalente a VMAF/SSIM, quindi non c'è retry automatico.
 
 ### 11.2 Cosa è stato verificato
 
@@ -516,6 +595,8 @@ magick INPUT.JPG -quality 90 -sampling-factor 2x1 -interlace JPEG `
 | Parte foto su **Windows PowerShell 5.1** e su foto **reali Sony** | **Non ancora verificata** |
 | Soglie foto di default (Q90, SSIM 0.990) | **Non calibrate** su foto reali |
 | Decodifica GPU nella misura VMAF | Non provata (nel mio ambiente non c'è QSV); è presente un fallback in software |
+| Conversione audio WAV/FLAC → Opus (tag, artisti multipli, copertina, CRC Ogg) | Provata su file sintetici con ffmpeg 9.0.1 (Windows) e Python: tag multipli separati, copertina copiata/estratta, file decodificabile, CRC delle pagine valido |
+| Conversione audio su **album reali** (vari tagger/formati) | **Non ancora verificata**: riporta eventuali tag mancanti o copertine non trovate |
 
 Se qualcosa non va, riporta il messaggio mostrato a schermo (o la riga del log CSV): è il modo più rapido per correggere.
 
@@ -542,7 +623,7 @@ Sconsigliato. Lo script salta le foto già a bassa qualità, ma per i video non 
 Per i video probabilmente sì, se il contenitore è MP4/MOV; le tracce dati proprietarie vengono comunque escluse. Per le foto, qualunque JPEG. Non è stato testato su altri modelli.
 
 **Come ripristino i valori di default?**
-Elimina `dji-compress.config.json` accanto allo script.
+Elimina `squeeze.config.json` accanto allo script.
 
 **Posso lanciarlo su una cartella di rete o su un disco esterno?**
 Sì, ma la velocità dipende dal disco. Meglio lavorare su un SSD locale e spostare i risultati dopo.
@@ -553,7 +634,9 @@ Sì, ma la velocità dipende dal disco. Meglio lavorare su un SSD locale e spost
 
 | Cosa | Dove |
 |---|---|
-| Aggiungere estensioni video/foto/file affiancati | `Extensions`, `PhotoExtensions`, `SidecarExts` in `dji-compress.config.json` |
+| Aggiungere estensioni video/foto/audio/file affiancati | `Extensions`, `PhotoExtensions`, `OpusExtensions`, `SidecarExts` in `squeeze.config.json` |
+| Cambiare i nomi/estensioni cercati per la copertina audio | `OpusCoverNames`, `OpusCoverExts` in `squeeze.config.json` |
+| Cambiare il separatore degli artisti | Ramo `ARTIST` in `Get-OpusComments` (PowerShell) / `get_opus_comments` (Python) |
 | Cambiare i parametri dell'encoder QSV | Funzione `Invoke-Encode`, variabile `$venc` nel ramo `qsv` |
 | Cambiare l'incremento dei retry | Variabili `$qStep` / `$qMin` in `Invoke-VideoJob`, `$newQ = $q + 3` in `Invoke-PhotoJob` |
 | Usare un altro formato audio | Variabile `$audio` in `Invoke-Encode` |
@@ -564,7 +647,7 @@ Se modifichi lo script, salvalo come UTF-8 con BOM e ricontrolla la sintassi con
 
 ```powershell
 $e = $null; $t = $null
-[void][System.Management.Automation.Language.Parser]::ParseFile("dji-compress.ps1", [ref]$t, [ref]$e)
+[void][System.Management.Automation.Language.Parser]::ParseFile("squeeze.ps1", [ref]$t, [ref]$e)
 if ($e) { $e | ForEach-Object { $_.Message } } else { "PARSE OK" }
 ```
 
@@ -592,5 +675,12 @@ if ($e) { $e | ForEach-Object { $_.Message } } else { "PARSE OK" }
 | **Traccia dati (`djmd`, `dbgi`, `rtmd`)** | Telemetria proprietaria DJI/Sony dentro il file video |
 | **Timecode** | Codice orario del fotogramma |
 | **Progressive JPEG** | JPEG che si carica per gradi di nitidezza; di solito un po' più piccolo |
+| **Opus** | Codec audio con perdita moderno ed efficiente; qui dentro un contenitore Ogg |
+| **Ogg** | Contenitore che ospita i file Opus; i tag sono **commenti Vorbis** |
+| **Commento Vorbis** | Tag nel formato `CHIAVE=valore`; la stessa chiave può ripetersi (è ciò che permette gli artisti multipli) |
+| **FLAC** | Codec audio **lossless** (senza perdita) |
+| **WAV** | Audio PCM non compresso; metadati nei chunk `RIFF`/`INFO` |
+| **VBR** | *Variable Bit Rate*: il bitrate varia con la complessità dell'audio |
+| **Copertina** | Immagine dell'album; qui salvata come file (`cover.jpg`/...) nella cartella `opus`, non incorporata |
 | **Sidecar** | File accessorio affiancato al media (XML, SRT, XMP) |
 | **`.part`** | File temporaneo in scrittura, rinominato a fine lavoro |
