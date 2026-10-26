@@ -29,7 +29,7 @@ Documento riferito a `squeeze.ps1` e `squeeze.py` (video DJI/Sony, foto JPEG e c
 
 | Tipo di file | Cosa succede | Come si controlla la qualità |
 |---|---|---|
-| **Video** (`.mp4`, `.mov`) | Ricodificati in HEVC (H.265) con la GPU Intel (Quick Sync) o con la CPU (x265). Risoluzione e fps restano uguali. | **VMAF** (0-100) confrontando output e originale |
+| **Video** (`.mp4`, `.mov`) | Ricodificati in HEVC (H.265) con la GPU NVIDIA (NVENC), GPU Intel (Quick Sync) o con la CPU (x265). Risoluzione e fps restano uguali. | **VMAF** (0-100) confrontando output e originale |
 | **Foto** (`.jpg`, `.jpeg`) | Ricodificate come JPEG a qualità inferiore, stessa risoluzione e stesso sottocampionamento del colore. | **SSIM** (0-1) + confronto dei metadati |
 | **Audio** (`.wav`, `.flac`) | Convertiti in **Opus** (>=128 kb/s, VBR), con tutti i tag copiati. Gli artisti multipli restano tag separati. | Nessuna misura: Opus a bitrate scelto è trasparente |
 
@@ -59,8 +59,9 @@ Il risparmio dipende molto dal contenuto: scene scure, rumorose o molto dettagli
 |---|---|---|
 | **Windows 10/11** | script `.ps1` | Usa `squeeze.ps1` con PowerShell 5.1+ |
 | **Linux (Fedora 44)** | script `.py` | Usa `squeeze.py` con Python 3.9+ |
-| **ffmpeg + ffprobe** (build *full*) | video e audio | Servono i componenti `libx265`, `libvmaf`, `libopus` e (per la GPU) `hevc_qsv` |
-| **GPU Intel con Quick Sync** + driver | video su GPU | Opzionale (ma consigliata). Su Windows usa D3D11, su Linux `/dev/dri/renderD128` |
+| **ffmpeg + ffprobe** (build *full*) | video e audio | Servono i componenti `libx265`, `libvmaf`, `libopus` e (per la GPU) `hevc_nvenc` e/o `hevc_qsv` |
+| **GPU NVIDIA (GeForce RTX 3000/4000)** + driver | video su GPU NVIDIA | Opzionale. Encoder NVENC (`hevc_nvenc`) con preset ad altissima qualità (`p7`, multipass fullres, spatial/temporal AQ) |
+| **GPU Intel con Quick Sync** + driver | video su GPU Intel | Opzionale (ma consigliata). Su Windows usa D3D11, su Linux `/dev/dri/renderD128` |
 | **ImageMagick 7** (comando `magick`) | foto | Deve avere la metrica `SSIM` |
 | **exiftool** | opzionale | Rende molto più preciso il confronto dei metadati delle foto |
 
@@ -94,7 +95,7 @@ powershell -ExecutionPolicy Bypass -File "squeeze.ps1"
 sudo dnf install https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-$(rpm -E %fedora).noarch.rpm
 sudo dnf install ffmpeg intel-media-driver ImageMagick perl-Image-ExifTool
 ```
-*Nota: `intel-media-driver` abilita il supporto Quick Sync (iHD) tramite VA-API per le iGPU Arrow Lake / Intel Arc 140T.*
+*Nota: `intel-media-driver` abilita il supporto Quick Sync (iHD) tramite VA-API per le iGPU Arrow Lake / Intel Arc 140T. Per NVIDIA installare i driver proprietari `akmod-nvidia` con supporto NVENC.*
 
 **Passo 2. Avvia lo script.**
 Avvia semplicemente la versione Python, che non ha dipendenze PIP esterne (usa solo librerie standard):
@@ -109,10 +110,10 @@ chmod +x squeeze.py
 
 Workflow consigliato, la prima volta che usi lo strumento su una nuova fotocamera:
 
-1. **Avvia lo script** e controlla le righe in alto: `Encoder` deve dire *Intel QSV (GPU)* (o x265), `VMAF` deve essere *disponibile*, `Foto` deve dire *ImageMagick OK*.
-2. **`[1]` Scegli cartella.** Trascina la cartella nella finestra o incolla il percorso.
+1. **Avvia lo script** e controlla il box riepilogativo in alto: `Encoder` mostrerà il badge verde *GPU NVENC* (se hai una scheda NVIDIA), *GPU QSV* (se hai una GPU Intel) oppure il badge giallo *CPU x265*; `VMAF` e `Foto` mostreranno i rispettivi badge di stato.
+2. **`[1]` Scegli cartella.** Premi Invio per aprire il selettore grafico cartelle nativo di sistema (oppure trascina la cartella o incollane il percorso).
 3. **`[2]` Analizza.** Controlla codec, risoluzione, bitrate (video) e qualità stimata (foto). Serve a capire cosa stai per comprimere.
-4. **Prova su pochi file.** Per i video, metti 2-3 clip in una cartella di prova e lancia `[4]`. Per le foto usa `[9]` (test su una foto).
+4. **Prova su pochi file.** Per i video puoi usare **`[11]`** (test comparativo su uno spezzone/clip con diversi valori CQ/CRF) oppure comprimere 2-3 clip con `[4]`. Per le foto usa `[9]` (test su una foto).
 5. **Guarda i file di output a occhio.** In particolare i clip scuri, i cieli e le scene con molto movimento. Le metriche non vedono tutto (vedi [6.3](#63-limiti-delle-metriche)).
 6. **Imposta i valori scelti** in `[6]` (o parti dal preset *Archivio*).
 7. **Lancia sul lotto vero** con `[4]` (video) e/o `[7]` (foto).
@@ -124,26 +125,43 @@ Workflow consigliato, la prima volta che usi lo strumento su una nuova fotocamer
 ## 4. Il menu, voce per voce
 
 ```
-[1] Scegli cartella (video, foto e audio)
-[2] Analizza cartella (elenco video e foto)
-[3] Comprimi VIDEO
-[4] Comprimi VIDEO + verifica + ricodifica automatica   (consigliato)
-[5] Solo verifica VIDEO (output già presenti)
-[6] Impostazioni
-[7] Comprimi FOTO JPEG (+ verifica SSIM e metadati + retry)
-[8] Solo verifica FOTO (output già presenti)
-[9] Test qualità su una foto (confronto di più valori)
-[10] Comprimi AUDIO (WAV/FLAC -> Opus)
-[0] Esci
+╭──────────────────────────────────────────────────────────────────────────────╮
+│                       S Q U E E Z E   •   Media Compressor                   │
+│                  Video HEVC (NVENC/QSV/x265) • Foto • Audio                  │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ Cartella   : [DIR]            C:\Media\Progetto                              │
+│ Encoder    : [GPU NVENC]      NVIDIA NVENC (CQ 24, preset p7)                │
+│ VMAF       : [OK]             Soglia 96 • Retry auto SI (1 frame ogni 5)     │
+│ Foto       : [OK]             ImageMagick (Q90, SSIM 0.990, exiftool)        │
+│ Audio      : [OK]             WAV/FLAC -> Opus 160 kb/s • Cover SI           │
+├──────────────────────────────────────────────────────────────────────────────┤
+│   CARTELLA E ANALISI                                                         │
+│    [1] Scegli cartella sorgente (trascina o premi Invio per sfogliare)       │
+│    [2] Analizza cartella (elenco video, foto e audio)                        │
+│   VIDEO (HEVC + VMAF)                                                        │
+│    [3] Comprimi VIDEO (solo compressione)                                    │
+│    [4] Comprimi VIDEO + verifica VMAF + retry auto              *consigliato │
+│    [5] Solo verifica VIDEO (output già presenti)                             │
+│    [11] Test qualità su un VIDEO (confronto di più valori CQ/CRF)            │
+│   FOTO (JPEG + SSIM)                                                         │
+│    [7] Comprimi FOTO JPEG (+ verifica SSIM e metadati + retry)               │
+│    [8] Solo verifica FOTO (output già presenti)                              │
+│    [9] Test qualità su una FOTO (confronto di più valori Q)                  │
+│   AUDIO (WAV/FLAC -> Opus)                                                   │
+│    [10] Comprimi AUDIO (WAV/FLAC -> Opus con tag e copertina)                │
+│   SISTEMA                                                                    │
+│    [6] Impostazioni                                    [0] Salva ed esci     │
+╰──────────────────────────────────────────────────────────────────────────────╯
 ```
 
 | Voce | Cosa fa | Note |
 |---|---|---|
-| **1** | Imposta la cartella sorgente. | Viene ricordata alla prossima apertura. Accetta il trascinamento della cartella. |
-| **2** | Elenca i file trovati con i loro parametri. | Non modifica nulla. Mostra anche il profilo colore (`Trc`) dei video. |
+| **1** | Imposta la cartella sorgente. | Viene ricordata alla prossima apertura. Accetta il trascinamento o, premendo Invio a vuoto, apre la finestra di dialogo grafica nativa (FolderBrowserDialog su Windows / Zenity, Kdialog o Tkinter su Linux). |
+| **2** | Elenca i file trovati con i loro parametri. | Non modifica nulla. Mostra anche il profilo colore (`Trc`) dei video e i file audio. |
 | **3** | Comprime i video senza verificare. | Più veloce, ma senza garanzia di qualità. |
-| **4** | Comprime, misura il VMAF e ricodifica da solo i file sotto soglia. | La modalità normale. Un output già presente viene verificato, non rifatto. |
+| **4** | Comprime, misura il VMAF e ricodifica da solo i file sotto soglia. | La modalità normale. Mostra la barra di avanzamento dinamica. Un output già presente viene verificato, non rifatto. |
 | **5** | Misura il VMAF di output già esistenti. | Utile per controllare file fatti in altro modo. |
+| **11** | Test qualità su uno spezzone/clip video con più valori CQ/CRF. | Confronta dimensioni, percentuale di risparmio, bitrate e VMAF senza scrivere in `out`. |
 | **6** | Menu impostazioni. | Vedi [sezione 5](#5-impostazioni-e-file-di-configurazione). |
 | **7** | Comprime le foto JPEG, poi SSIM + metadati + retry. | Salta le foto già compresse almeno quanto il target. |
 | **8** | Verifica SSIM e metadati di output foto già esistenti. | |
@@ -161,36 +179,38 @@ Prima di ogni lotto lo script mostra un riepilogo (numero file, encoder, qualit�
 
 | Tasto | Impostazione | Default | Intervallo | Significato |
 |---|---|---|---|---|
-| `1` | Encoder | `auto` | auto / qsv / x265 | `auto` usa QSV se funziona davvero, altrimenti x265 |
-| `2` | Qualità QSV (`global_quality`) | 24 | 10-40 | Più basso = qualità più alta e file più grande |
-| `3` | Qualità x265 (CRF) | 20 | 10-35 | Idem |
-| `4` | Preset x265 | `medium` | ultrafast...slower | Più lento = file un po' più piccolo |
-| `5` | Soglia VMAF | 96 | 80-99 | Sotto, il video viene rifatto |
-| `6` | Precisione VMAF | 5 | 1-30 | Analizza 1 frame ogni N (1 = tutti, lentissimo) |
-| `7` | Retry automatico | SI (max 2) | 1-5 tentativi | Rifà i file sotto soglia a qualità più alta |
-| `8` | Includi sottocartelle | NO | SI/NO | Ricorsivo; mantiene la struttura in `out` |
-| `9` | Sovrascrivi output | NO | SI/NO | Se NO, i file già in `out` non vengono rifatti |
-| `A` | Conserva date file | SI | SI/NO | Copia data di creazione e modifica sull'output |
-| `B` | Cartella output | `<sorgente>\out` | percorso | Vuoto = default |
-| `C` | Audio | `auto` | auto / copy / aac | `auto`: PCM diventa AAC, il resto resta in copia |
-| `D` | Bitrate AAC | 320 | 128-512 kb/s | Usato solo quando l'audio viene convertito |
-| `E` | xvYCC → bt709 (Sony) | SI | SI/NO | Cambia solo l'etichetta del colore, non i pixel |
-| `F` | Copia XML/SRT/XMP | SI | SI/NO | Copia i file affiancati al video/foto |
+| `1` | Encoder | `auto` | auto / nvenc / qsv / x265 | `auto` prova in cascata: NVENC -> QSV -> x265 |
+| `2` | Qualità NVENC (CQ) | 24 | 10-40 | Più basso = qualità più alta e file più grande |
+| `3` | Preset NVENC | `p7` | p1...p7 | `p1` (più veloce) ... `p7` (massima qualità HQ) |
+| `4` | Qualità QSV (`global_quality`) | 24 | 10-40 | Più basso = qualità più alta e file più grande |
+| `5` | Qualità x265 (CRF) | 20 | 10-35 | Idem per x265 su CPU |
+| `6` | Preset x265 | `medium` | ultrafast...slower | Più lento = file un po' più piccolo |
+| `7` | Soglia VMAF | 96 | 80-99 | Sotto, il video viene rifatto |
+| `8` | Precisione VMAF | 5 | 1-30 | Analizza 1 frame ogni N (1 = tutti, lentissimo) |
+| `9` | Retry automatico | SI (max 2) | 1-5 tentativi | Rifà i file sotto soglia a qualità più alta |
 | `G` | Qualità foto (JPEG) | 90 | 50-98 | Qualità di partenza per `magick -quality` |
 | `H` | Soglia SSIM foto | 0.990 | 0.95-0.9999 | Sotto, la foto viene rifatta a Q più alta |
 | `I` | JPEG progressivo | SI | SI/NO | File un po' più piccoli; compatibile con i browser e i social |
 | `J` | Verifica foto | SI | SI/NO | SSIM + confronto metadati |
+| `C` | Audio video | `auto` | auto / copy / aac | `auto`: PCM diventa AAC, il resto resta in copia |
+| `D` | Bitrate AAC | 320 | 128-512 kb/s | Usato solo quando l'audio viene convertito |
 | `K` | Bitrate Opus | 160 | 128-512 kb/s | Bitrate medio VBR della conversione audio (`[10]`) |
 | `L` | Copertina audio | SI | SI/NO | Copia/estrae la copertina nella cartella `opus` |
+| `A` | Includi sottocartelle | NO | SI/NO | Ricorsivo; mantiene la struttura in `out` |
+| `B` | Sovrascrivi output | NO | SI/NO | Se NO, i file già in `out` non vengono rifatti |
+| `M` | Conserva date file | SI | SI/NO | Copia data di creazione e modifica sull'output |
+| `N` | Cartella output | `<sorgente>\out` | percorso | Vuoto = default |
+| `E` | xvYCC → bt709 (Sony) | SI | SI/NO | Cambia solo l'etichetta del colore, non i pixel |
+| `F` | Copia XML/SRT/XMP | SI | SI/NO | Copia i file affiancati al video/foto |
 | `P` | Preset rapidi | | | Vedi sotto |
 
 ### 5.2 Preset rapidi (`P`)
 
-| Preset | QSV | x265 CRF | Soglia VMAF | Foto Q | Soglia SSIM |
-|---|---|---|---|---|---|
-| **Sicuro** | 21 | 18 | 97 | 93 | 0.993 |
-| **Archivio** (consigliato) | 24 | 20 | 96 | 90 | 0.990 |
-| **Compatto** | 27 | 22 | 95 | 85 | 0.985 |
+| Preset | NVENC CQ | QSV | x265 CRF | Soglia VMAF | Foto Q | Soglia SSIM |
+|---|---|---|---|---|---|---|
+| **Sicuro** | 21 | 21 | 18 | 97 | 93 | 0.993 |
+| **Archivio** (consigliato) | 24 | 24 | 20 | 96 | 90 | 0.990 |
+| **Compatto** | 27 | 27 | 22 | 95 | 85 | 0.985 |
 
 I preset non toccano le altre impostazioni (audio, sottocartelle, ecc.).
 
@@ -204,6 +224,8 @@ Viene creato accanto allo script e riscritto a ogni modifica. Puoi editarlo a ma
   "OutDir": "",
   "Recurse": false,
   "Encoder": "auto",
+  "NvencCq": 24,
+  "NvencPreset": "p7",
   "QsvQuality": 24,
   "X265Crf": 20,
   "X265Preset": "medium",
@@ -242,7 +264,7 @@ Viene creato accanto allo script e riscritto a ogni modifica. Puoi editarlo a ma
 
 ### 6.1 Video
 
-La scala `global_quality` (QSV) e `CRF` (x265) **non sono equivalenti**: i numeri non si confrontano tra i due encoder. Esempio misurato su un clip DJI di 8 secondi (originale 45,3 MiB, 43,6 Mbps):
+La scala `CQ` (NVENC), `global_quality` (QSV) e `CRF` (x265) **non sono identiche tra loro**: i numeri hanno comportamenti e scale leggermente differenti a seconda dell'architettura dell'encoder, sebbene NVENC CQ e QSV global_quality si attestino su intervalli pratici comparabili. Esempio misurato su un clip DJI di 8 secondi (originale 45,3 MiB, 43,6 Mbps):
 
 | QSV `global_quality` | Dimensione | Risparmio | VMAF |
 |---|---|---|---|
@@ -260,11 +282,20 @@ Regole pratiche per il VMAF:
 
 Consigli:
 
-- **Archivio** (QSV 24, soglia 96) è un buon punto di partenza.
-- **QSV 27 con retry attivo** risparmia di più: i clip facili restano a 27, quelli difficili vengono rifatti a 24 o 21 da soli.
+- **Archivio** (NVENC CQ 24 / QSV 24, soglia 96) è un eccellente punto di partenza.
+- **NVENC CQ 27 (o QSV 27) con retry attivo** massimizza il risparmio: i clip facili restano leggeri a 27, quelli complessi vengono ricodificati a 24 o 21 in automatico.
 - Un clip che viene ricodificato dal retry di solito ha poca luce, rumore o molto dettaglio: guardalo a occhio.
 
-### 6.2 Foto
+### 6.2 Test rapido video ([11])
+
+Se vuoi testare l'encoder e i valori di qualità prima di avviare un intero lotto, usa la voce **`[11] Test qualità su un VIDEO`**. Permette di:
+1. Scegliere uno dei video presenti nella cartella sorgente.
+2. Scegliere se testare l'intero clip o uno spezzone breve (es. 10 secondi a partire da un offset desiderato, molto veloce per test iterativi).
+3. Specificare una serie di valori di qualità da confrontare (es. `21, 24, 27, 30` per NVENC/QSV o `18, 20, 22` per x265).
+4. Generare una tabella riassuntiva con dimensione, risparmio %, bitrate risultante, punteggio VMAF e velocità di codifica (fps).
+I file generati sono temporanei e vengono cancellati al termine del test senza toccare la cartella `out`.
+
+### 6.3 Foto
 
 Il test `[9]` mostra una tabella come questa (valori di esempio, non reali):
 
@@ -281,7 +312,7 @@ Scegli la **qualità più bassa con SSIM sopra la tua soglia e metadati OK**, po
 - Le foto già salvate a una qualità pari o inferiore al target vengono **saltate** (`GIA COMPRESSA`): ricomprimerle aggiungerebbe solo perdita. Per forzarle abbassa la qualità in `G`.
 - Ricomprimere un JPEG è **sempre** una perdita tecnica, anche se non si vede. Se vuoi zero perdita, serve un ottimizzatore lossless (es. `jpegtran`), che questo strumento non include.
 
-### 6.3 Limiti delle metriche
+### 6.4 Limiti delle metriche
 
 VMAF e SSIM sono **medie** e non vedono bene alcuni difetti localizzati: *banding* nei cieli, rumore nelle zone scure, piccoli dettagli. Per questo conviene controllare a occhio almeno un file scuro e uno con molto movimento prima di cancellare gli originali.
 
@@ -391,37 +422,54 @@ La conversione audio `[10]` non ha verifica di qualità: gli stati sono `OK`, `E
 
 ### 9.1 Struttura del codice
 
-Un solo file `.ps1`, organizzato in sezioni:
+Un solo file `.ps1` (o `.py` su Linux), organizzato in sezioni:
 
 | Sezione | Funzioni principali |
 |---|---|
 | Configurazione | `Import-Config`, `Save-Config` (JSON accanto allo script) |
-| Utilità | `Read-Default`, `Read-IntRange`, `Get-OutDir` |
-| Controllo strumenti | `Test-Tools`, `Resolve-Encoder` |
+| Utilità e TUI | `Write-BoxTop`, `Write-BoxLine`, `Write-BoxBadgedLine`, `Write-CenteredProgress`, `Read-BoxPrompt`, `Read-Default`, `Read-IntRange`, `Get-OutDir` |
+| Controllo strumenti | `Test-Tools`, `Resolve-Encoder` (cascata NVENC -> QSV -> x265) |
 | Analisi | `Get-VideoInfo`, `Get-ColorArgs`, `Test-AudioToAac`, `Get-MediaFiles`, `Copy-Sidecars` |
 | Video | `Invoke-Encode`, `Measure-Vmaf`, `Invoke-VideoJob` |
 | Foto | `Get-PhotoInfo`, `Invoke-PhotoEncode`, `Measure-Ssim`, `Test-PhotoMetadata`, `Invoke-PhotoJob` |
 | Audio | `Get-FlacComments`, `Get-RiffInfoComments`, `Get-OpusComments`, `Set-OpusTags`, `Set-AudioCover`, `Invoke-AudioJob` |
-| Lotti e TUI | `Start-Batch`, `Show-Scan`, `Show-PhotoTest`, `Select-Folder`, `Show-SettingsMenu`, `Show-MainMenu` |
+| Lotti e Menu | `Start-Batch`, `Show-Scan`, `Show-VideoTest`, `Show-PhotoTest`, `Select-Folder`, `Show-SettingsMenu`, `Show-MainMenu` |
 
 ### 9.2 Rilevamento degli strumenti (`Test-Tools`)
 
 1. Cerca `ffmpeg` e `ffprobe` nel PATH.
 2. Cerca `magick` nel PATH; se manca prova `C:\Program Files\ImageMagick*\magick.exe`.
 3. Se non trova **nessuno** dei due gruppi, esce con errore.
-4. Legge gli encoder (`hevc_qsv`, `libx265`) e i filtri (`libvmaf`) di ffmpeg.
-5. **Prova reale di QSV**: codifica 0,2 secondi di un colore fisso con `hevc_qsv`. Il PATH può avere l'encoder anche se la GPU non risponde: conta il risultato del test.
-6. Controlla se ImageMagick elenca la metrica `SSIM` e se esiste `exiftool`.
+4. Legge gli encoder (`hevc_nvenc`, `hevc_qsv`, `libx265`) e i filtri (`libvmaf`, `libopus`) di ffmpeg.
+5. **Prova reale di NVENC**: codifica 0,2 secondi di un colore fisso in formato 10-bit con `hevc_nvenc -profile:v main10`. Se il comando fallisce (es. driver NVIDIA non presente o GPU non compatibile), disattiva NVENC.
+6. **Prova reale di QSV**: codifica 0,2 secondi con `hevc_qsv`. Conta il risultato reale dell'esecuzione, non solo la presenza nel PATH.
+7. Controlla se ImageMagick elenca la metrica `SSIM` e se esiste `exiftool`.
 
 ### 9.3 Pipeline video (`Invoke-VideoJob`)
 
 1. `ffprobe` legge codec, formato pixel, risoluzione, fps, tag colore, codec e canali audio.
-2. Scelta della qualità di partenza (QSV o CRF).
+2. Scelta della qualità di partenza (NVENC CQ, QSV o CRF).
 3. Se l'output esiste e `Sovrascrivi` è spento: niente ricodifica.
 4. Codifica in `<file>.part`, poi `Move-Item` sul nome finale solo se ffmpeg termina con codice 0.
-5. In modalità verifica: VMAF contro l'originale; se sotto soglia e il retry è attivo, ricodifica con qualità più alta (QSV: -3 per tentativo, minimo 15; x265: -2, minimo 12), fino a `MaxRetries`.
+5. In modalità verifica: VMAF contro l'originale; se sotto soglia e il retry è attivo, ricodifica con qualità più alta:
+   - **NVENC**: -3 CQ per tentativo, minimo 14.
+   - **QSV**: -3 per tentativo, minimo 15.
+   - **x265**: -2 CRF per tentativo, minimo 12.
 6. Se l'output pesa quanto o più dell'originale, viene eliminato.
 7. Copia di date file e file affiancati.
+
+**Comando ffmpeg equivalente (NVIDIA NVENC, sorgente 10 bit, preset HQ):**
+
+```powershell
+ffmpeg -hide_banner -loglevel error -stats -y `
+  -hwaccel cuda -hwaccel_output_format cuda -i INPUT.MP4 `
+  -map 0:V:0 -map 0:a? -dn -map_metadata 0 `
+  -c:v hevc_nvenc -profile:v main10 -preset p7 -tune hq -multipass fullres `
+  -rc vbr -cq 24 -b:v 0 -rc-lookahead 32 -spatial-aq 1 -temporal-aq 1 `
+  -movflags use_metadata_tags+faststart -tag:v hvc1 `
+  -color_primaries bt709 -color_trc bt709 -colorspace bt709 -color_range tv `
+  -c:a copy -f mp4 INPUT_OUT.MP4.part
+```
 
 **Comando ffmpeg equivalente (QSV, sorgente 10 bit):**
 
@@ -447,6 +495,12 @@ ffmpeg -hide_banner -loglevel error -stats -y `
 | `faststart` | Sposta l'indice all'inizio: partenza più rapida in streaming |
 | tag colore | Letti da `ffprobe` e copiati, **non** forzati: D-Log e HLG restano corretti |
 
+**Percorsi di codifica NVENC (fallback a 3 livelli):**
+
+1. Livello 1: decodifica CUDA completa in GPU (`-hwaccel cuda -hwaccel_output_format cuda`) con opzioni avanzate HQ (`-multipass fullres`, `-spatial-aq 1`, `-temporal-aq 1`, `-rc-lookahead 32`). Se il clip è 4:2:2/4:4:4, questo livello viene saltato.
+2. Livello 2: decodifica software su CPU + `-vf format=p010le` (o `format=nv12`) e codifica NVENC HQ su GPU.
+3. Livello 3: decodifica software e codifica NVENC senza filtri AQ avanzati (safe mode per build o schede con limitazioni).
+
 **Percorsi di codifica QSV (fallback automatico):**
 
 1. Decodifica e codifica interamente su GPU (`-hwaccel qsv -hwaccel_output_format qsv`).
@@ -462,14 +516,15 @@ ffmpeg -hide_banner -loglevel error -stats -y `
 ### 9.4 Misura VMAF (`Measure-Vmaf`)
 
 ```powershell
-ffmpeg -hide_banner -nostats -hwaccel qsv -i COMPRESSO -hwaccel qsv -i ORIGINALE `
+ffmpeg -hide_banner -nostats -hwaccel cuda -i COMPRESSO -hwaccel cuda -i ORIGINALE `
   -lavfi "[0:v:0][1:v:0]libvmaf=n_threads=<core>:n_subsample=<N>" -an -sn -dn -f null -
 ```
 
 - Primo input = compresso (*distorted*), secondo = originale (*reference*).
-- Con QSV funzionante prova prima la decodifica su GPU (libera la CPU per VMAF); se non restituisce un punteggio, ripete in software.
+- Supporta accelerazione decodifica a cascata: se l'encoder è NVENC prova prima `-hwaccel cuda`; se l'encoder è QSV o CUDA non risponde prova `-hwaccel qsv`; infine ricorre alla decodifica software su CPU.
 - Il numero viene letto dalla riga `VMAF score: ...`.
 - `n_subsample=5` analizza un frame ogni cinque: molto più veloce e sufficiente per individuare i file problematici.
+- Supporta un parametro opzionale di durata (usato da `[11]` per test rapidi su spezzoni).
 
 ### 9.5 Pipeline foto (`Invoke-PhotoJob`)
 
@@ -659,8 +714,10 @@ if ($e) { $e | ForEach-Object { $_.Message } } else { "PARSE OK" }
 |---|---|
 | **HEVC / H.265** | Codec video moderno, circa il doppio di efficienza rispetto a H.264 |
 | **AVC / H.264** | Codec video diffuso (usato dalla Sony nel tuo caso) |
+| **NVENC** | Encoder video hardware su GPU NVIDIA (GeForce RTX / Quadro) |
 | **QSV (Quick Sync Video)** | Encoder/decoder hardware nelle GPU Intel |
 | **x265** | Encoder HEVC software (CPU): lento ma molto efficiente |
+| **CQ** | *Constant Quality*: parametro di qualità costante per NVENC (più basso = migliore qualità) |
 | **CRF** | *Constant Rate Factor*: qualità costante di x265 (più basso = migliore) |
 | **global_quality** | Equivalente del CRF per QSV (modalità ICQ) |
 | **Bitrate** | Dati al secondo di video (Mbps); più alto = file più grande |

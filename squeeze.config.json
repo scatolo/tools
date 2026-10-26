@@ -1,0 +1,55 @@
+﻿{
+    "SourceDir":  "",
+    "OutDir":  "",
+    "Recurse":  false,
+    "Encoder":  "auto",
+    "NvencCq":  24,
+    "NvencPreset":  "p7",
+    "QsvQuality":  24,
+    "X265Crf":  20,
+    "X265Preset":  "medium",
+    "VmafThreshold":  96,
+    "VmafSubsample":  5,
+    "AutoRetry":  true,
+    "MaxRetries":  2,
+    "Overwrite":  false,
+    "PreserveDates":  true,
+    "AudioMode":  "auto",
+    "AacBitrate":  320,
+    "NormalizeXvYCC":  true,
+    "CopySidecars":  true,
+    "SidecarExts":  [
+                        ".xml",
+                        ".srt",
+                        ".xmp"
+                    ],
+    "PhotoQuality":  90,
+    "PhotoSsim":  0.99,
+    "PhotoProgressive":  true,
+    "PhotoVerify":  true,
+    "PhotoExtensions":  [
+                            ".jpg",
+                            ".jpeg"
+                        ],
+    "Extensions":  [
+                       ".mp4",
+                       ".mov"
+                   ],
+    "OpusBitrate":  160,
+    "OpusCover":  true,
+    "OpusExtensions":  [
+                           ".wav",
+                           ".flac"
+                       ],
+    "OpusCoverNames":  [
+                           "cover",
+                           "folder",
+                           "front",
+                           "album"
+                       ],
+    "OpusCoverExts":  [
+                          ".jpg",
+                          ".jpeg",
+                          ".png"
+                      ]
+}

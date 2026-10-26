@@ -3,9 +3,9 @@
     Squeeze - riduzione di video (HEVC), foto (JPEG) e audio (Opus) con verifica qualita'.
 
 .DESCRIPTION
-    TUI testuale per:
+    TUI testuale centrata per:
       * scegliere una cartella di video (cambia a ogni sessione, l'ultima viene ricordata)
-      * comprimere con Intel Quick Sync (hevc_qsv) o x265 (software)
+      * comprimere con NVIDIA NVENC (hevc_nvenc), Intel Quick Sync (hevc_qsv) o x265 (software)
       * verificare la qualita' di ogni file con VMAF contro l'originale
       * ricodificare automaticamente a qualita' piu' alta i file sotto soglia
       * salvare un log CSV con dimensioni, risparmio e punteggio di ogni file
@@ -24,6 +24,11 @@
 #>
 
 $ErrorActionPreference = 'Continue'
+try {
+    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+    $OutputEncoding = [System.Text.Encoding]::UTF8
+} catch { }
+
 $script:Inv = [Globalization.CultureInfo]::InvariantCulture
 $scriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
 $script:ConfigPath = Join-Path $scriptDir 'squeeze.config.json'
@@ -33,35 +38,37 @@ $script:LegacyConfigPath = Join-Path $scriptDir 'dji-compress.config.json'
 #  CONFIGURAZIONE (salvata in squeeze.config.json accanto allo script)
 # ----------------------------------------------------------------------------
 $script:Cfg = [ordered]@{
-    SourceDir     = ''
-    OutDir        = ''            # vuoto = <cartella sorgente>\out
-    Recurse       = $false        # cerca anche nelle sottocartelle
-    Encoder       = 'auto'        # auto | qsv | x265
-    QsvQuality    = 24            # -global_quality (piu' basso = qualita' piu' alta)
-    X265Crf       = 20            # -crf (piu' basso = qualita' piu' alta)
-    X265Preset    = 'medium'      # ultrafast ... slow, slower
-    VmafThreshold = 96            # sotto questo punteggio il file e' "da rifare"
-    VmafSubsample = 5             # 1 = tutti i frame (lento), 5 = un frame ogni 5
-    AutoRetry     = $true         # ricodifica automatica se sotto soglia
-    MaxRetries    = 2
-    Overwrite     = $false        # sovrascrive output gia' esistenti
-    PreserveDates = $true         # copia data creazione/modifica sull'output
-    AudioMode     = 'auto'        # auto = PCM -> AAC, altri formati in copia | copy | aac
-    AacBitrate    = 320           # kb/s, usato quando l'audio viene convertito in AAC
-    NormalizeXvYCC = $true        # Sony: tag trasferimento xvYCC -> bt709 (solo etichetta, pixel invariati)
-    CopySidecars  = $true         # copia i file affiancati (XML Sony, SRT DJI, XMP)
-    SidecarExts   = @('.xml', '.srt', '.xmp')
-    PhotoQuality  = 90            # qualita' JPEG di partenza (ImageMagick -quality)
-    PhotoSsim     = 0.990         # soglia SSIM: sotto, la foto viene ricodificata a qualita' piu' alta
-    PhotoProgressive = $true      # JPEG progressivo (file un po' piu' piccoli)
-    PhotoVerify   = $true         # verifica SSIM + confronto metadati dopo la compressione
-    PhotoExtensions = @('.jpg', '.jpeg')
-    Extensions    = @('.mp4', '.mov')
-    OpusBitrate   = 160           # kb/s (libopus VBR); minimo consentito 128
-    OpusCover     = $true         # copia/estrae la copertina nella cartella opus
-    OpusExtensions = @('.wav', '.flac')
-    OpusCoverNames = @('cover', 'folder', 'front', 'album')
-    OpusCoverExts  = @('.jpg', '.jpeg', '.png')
+    SourceDir        = ''
+    OutDir           = ''            # vuoto = <cartella sorgente>\out
+    Recurse          = $false        # cerca anche nelle sottocartelle
+    Encoder          = 'auto'        # auto | nvenc | qsv | x265
+    NvencCq          = 24            # -cq per hevc_nvenc (10-40, piu' basso = qualita' piu' alta)
+    NvencPreset      = 'p7'          # p1 (piu' veloce) ... p7 (piu' lento, qualita' massima)
+    QsvQuality       = 24            # -global_quality (piu' basso = qualita' piu' alta)
+    X265Crf          = 20            # -crf (piu' basso = qualita' piu' alta)
+    X265Preset       = 'medium'      # ultrafast ... slow, slower
+    VmafThreshold    = 96            # sotto questo punteggio il file e' "da rifare"
+    VmafSubsample    = 5             # 1 = tutti i frame (lento), 5 = un frame ogni 5
+    AutoRetry        = $true         # ricodifica automatica se sotto soglia
+    MaxRetries       = 2
+    Overwrite        = $false        # sovrascrive output gia' esistenti
+    PreserveDates    = $true         # copia data creazione/modifica sull'output
+    AudioMode        = 'auto'        # auto = PCM -> AAC, altri formati in copia | copy | aac
+    AacBitrate       = 320           # kb/s, usato quando l'audio viene convertito in AAC
+    NormalizeXvYCC   = $true         # Sony: tag trasferimento xvYCC -> bt709 (solo etichetta, pixel invariati)
+    CopySidecars     = $true         # copia i file affiancati (XML Sony, SRT DJI, XMP)
+    SidecarExts      = @('.xml', '.srt', '.xmp')
+    PhotoQuality     = 90            # qualita' JPEG di partenza (ImageMagick -quality)
+    PhotoSsim        = 0.990         # soglia SSIM: sotto, la foto viene ricodificata a qualita' piu' alta
+    PhotoProgressive = $true         # JPEG progressivo (file un po' piu' piccoli)
+    PhotoVerify      = $true         # verifica SSIM + confronto metadati dopo la compressione
+    PhotoExtensions  = @('.jpg', '.jpeg')
+    Extensions       = @('.mp4', '.mov')
+    OpusBitrate      = 160           # kb/s (libopus VBR); minimo consentito 128
+    OpusCover        = $true         # copia/estrae la copertina nella cartella opus
+    OpusExtensions   = @('.wav', '.flac')
+    OpusCoverNames   = @('cover', 'folder', 'front', 'album')
+    OpusCoverExts    = @('.jpg', '.jpeg', '.png')
 }
 
 function Import-Config {
@@ -86,9 +93,175 @@ function Save-Config {
 }
 
 # ----------------------------------------------------------------------------
-#  UTILITA'
+#  UTILITA' E LAYOUT CENTRATO
 # ----------------------------------------------------------------------------
-function Wait-Enter { [void](Read-Host 'Premi Invio per continuare') }
+$script:BoxW = 76
+
+function Get-ConsoleWidth {
+    try {
+        if ($Host -and $Host.UI -and $Host.UI.RawUI) {
+            $w = $Host.UI.RawUI.WindowSize.Width
+            if ($w -gt 20) { return $w }
+        }
+    } catch { }
+    return 80
+}
+
+function Get-BoxPad([int]$Width = $script:BoxW) {
+    $conW = Get-ConsoleWidth
+    $m = [math]::Max(0, [math]::Floor(($conW - $Width) / 2))
+    return (' ' * $m)
+}
+
+function Write-BoxTop([int]$Width = $script:BoxW, [string]$Color = "DarkCyan") {
+    $pad = Get-BoxPad $Width
+    $inner = [string][char]0x2500 * ($Width - 2)
+    Write-Host ("{0}{1}{2}{3}" -f $pad, [char]0x256D, $inner, [char]0x256E) -ForegroundColor $Color
+}
+
+function Write-BoxSep([int]$Width = $script:BoxW, [string]$Color = "DarkCyan") {
+    $pad = Get-BoxPad $Width
+    $inner = [string][char]0x2500 * ($Width - 2)
+    Write-Host ("{0}{1}{2}{3}" -f $pad, [char]0x251C, $inner, [char]0x2524) -ForegroundColor $Color
+}
+
+function Write-BoxBottom([int]$Width = $script:BoxW, [string]$Color = "DarkCyan") {
+    $pad = Get-BoxPad $Width
+    $inner = [string][char]0x2500 * ($Width - 2)
+    Write-Host ("{0}{1}{2}{3}" -f $pad, [char]0x2570, $inner, [char]0x256F) -ForegroundColor $Color
+}
+
+function Write-BoxLine {
+    param(
+        [string]$Text = '',
+        [string]$Align = 'Left',
+        [string]$Color = "White",
+        [string]$BorderColor = "DarkCyan",
+        [int]$Width = $script:BoxW
+    )
+    $pad = Get-BoxPad $Width
+    $innerW = $Width - 2
+    if ($Text.Length -gt $innerW) {
+        $Text = $Text.Substring(0, $innerW - 3) + '...'
+    }
+    $rem = $innerW - $Text.Length
+    $leftPad = 0
+    $rightPad = 0
+    if ($Align -eq 'Center') {
+        $leftPad = [math]::Floor($rem / 2)
+        $rightPad = $rem - $leftPad
+    } elseif ($Align -eq 'Right') {
+        $leftPad = $rem
+        $rightPad = 0
+    } else {
+        $leftPad = 0
+        $rightPad = $rem
+    }
+    Write-Host $pad -NoNewline
+    Write-Host ([char]0x2502) -ForegroundColor $BorderColor -NoNewline
+    if ($leftPad -gt 0) { Write-Host (' ' * $leftPad) -NoNewline }
+    Write-Host $Text -ForegroundColor $Color -NoNewline
+    if ($rightPad -gt 0) { Write-Host (' ' * $rightPad) -NoNewline }
+    Write-Host ([char]0x2502) -ForegroundColor $BorderColor
+}
+
+function Write-BoxBadgedLine {
+    param(
+        [string]$Label,
+        [string]$Badge,
+        [string]$BadgeColor,
+        [string]$Detail,
+        [string]$DetailColor = "Gray",
+        [string]$BorderColor = "DarkCyan",
+        [int]$Width = $script:BoxW
+    )
+    $pad = Get-BoxPad $Width
+    $innerW = $Width - 2
+    $prefix = "  {0,-8} : " -f $Label
+    $badgeStr = "[{0}]" -f $Badge
+    $usedLen = $prefix.Length + $badgeStr.Length + 1 + $Detail.Length
+    $detailStr = $Detail
+    if ($usedLen -gt $innerW) {
+        $maxDetail = $innerW - ($prefix.Length + $badgeStr.Length + 1)
+        if ($maxDetail -gt 3) {
+            $detailStr = $detailStr.Substring(0, $maxDetail - 3) + '...'
+        } else {
+            $detailStr = ''
+        }
+    }
+    $rem = [math]::Max(0, $innerW - ($prefix.Length + $badgeStr.Length + 1 + $detailStr.Length))
+    Write-Host $pad -NoNewline
+    Write-Host ([char]0x2502) -ForegroundColor $BorderColor -NoNewline
+    Write-Host $prefix -ForegroundColor DarkGray -NoNewline
+    Write-Host $badgeStr -ForegroundColor $BadgeColor -NoNewline
+    Write-Host (" " + $detailStr) -ForegroundColor $DetailColor -NoNewline
+    if ($rem -gt 0) { Write-Host (' ' * $rem) -NoNewline }
+    Write-Host ([char]0x2502) -ForegroundColor $BorderColor
+}
+
+function Write-BoxTwoCol {
+    param(
+        [string]$Left,
+        [string]$Right,
+        [string]$LeftColor = "White",
+        [string]$RightColor = "White",
+        [string]$BorderColor = "DarkCyan",
+        [int]$Width = $script:BoxW
+    )
+    $pad = Get-BoxPad $Width
+    $innerW = $Width - 2
+    if (($Left.Length + $Right.Length) -gt $innerW) {
+        $maxL = $innerW - $Right.Length - 3
+        if ($maxL -gt 0) { $Left = $Left.Substring(0, $maxL) + '...' }
+        else { $Left = '' }
+    }
+    $rem = [math]::Max(1, $innerW - ($Left.Length + $Right.Length))
+    Write-Host $pad -NoNewline
+    Write-Host ([char]0x2502) -ForegroundColor $BorderColor -NoNewline
+    Write-Host $Left -ForegroundColor $LeftColor -NoNewline
+    Write-Host (' ' * $rem) -NoNewline
+    Write-Host $Right -ForegroundColor $RightColor -NoNewline
+    Write-Host ([char]0x2502) -ForegroundColor $BorderColor
+}
+
+function Read-BoxPrompt([string]$PromptText = 'Scelta') {
+    $pad = Get-BoxPad $script:BoxW
+    Write-Host ("`n{0}{1}: " -f $pad, $PromptText) -ForegroundColor Cyan -NoNewline
+    try {
+        $res = Read-Host
+        if ($res) { return $res.Trim() }
+        if ([Console]::IsInputRedirected) { return '0' }
+        return ''
+    } catch {
+        return '0'
+    }
+}
+
+function Write-CenteredProgress([int]$Current, [int]$Total, [string]$FileName, [int]$BarWidth = 24) {
+    if ($Total -le 0) { $Total = 1 }
+    $pct = [int][math]::Round(($Current / $Total) * 100)
+    $filled = [int][math]::Round(($Current / $Total) * $BarWidth)
+    if ($filled -gt $BarWidth) { $filled = $BarWidth }
+    if ($filled -lt 0) { $filled = 0 }
+    $empty = $BarWidth - $filled
+    $bar = ([string][char]0x2588 * $filled) + ([string][char]0x2591 * $empty)
+    $prefix = ("[{0}] {1,3}% ({2}/{3}) • " -f $bar, $pct, $Current, $Total)
+    $conW = Get-ConsoleWidth
+    $maxFn = $conW - $prefix.Length - 4
+    if ($maxFn -gt 3 -and $FileName.Length -gt $maxFn) {
+        $FileName = $FileName.Substring(0, $maxFn - 3) + '...'
+    }
+    $text = $prefix + $FileName
+    $pad = ' ' * [math]::Max(0, [math]::Floor(($conW - $text.Length) / 2))
+    Write-Host ''
+    Write-Host ("{0}{1}" -f $pad, $text) -ForegroundColor Cyan
+}
+
+function Wait-Enter {
+    $pad = Get-BoxPad $script:BoxW
+    Write-Host ("`n{0}Premi Invio per continuare..." -f $pad) -ForegroundColor DarkGray -NoNewline
+    [void](Read-Host)
+}
 
 function Read-Default([string]$Prompt, [string]$Default) {
     $r = Read-Host "$Prompt [$Default]"
@@ -128,6 +301,7 @@ function Test-UnderDir([string]$Path, [string]$Dir) {
 # ----------------------------------------------------------------------------
 $script:HasX265 = $false
 $script:HasVmaf = $false
+$script:NvencWorks = $false
 $script:QsvWorks = $false
 $script:HasOpus = $false
 
@@ -158,6 +332,18 @@ function Test-Tools {
         $script:HasX265 = $enc -match 'libx265'
         $script:HasVmaf = $flt -match 'libvmaf'
         $script:HasOpus = $enc -match 'libopus'
+        if ($enc -match 'hevc_nvenc') {
+            # Prova reale: encode minuscolo di 0.2s verso null per testare presenza GPU NVIDIA e driver
+            & ffmpeg -hide_banner -loglevel error -f lavfi -i 'color=c=black:s=1280x720:d=0.2' -vf 'format=p010le' `
+                -c:v hevc_nvenc -profile:v main10 -f null - 2>$null
+            if ($LASTEXITCODE -eq 0) {
+                $script:NvencWorks = $true
+            } else {
+                & ffmpeg -hide_banner -loglevel error -f lavfi -i 'color=c=black:s=1280x720:d=0.2' -vf 'format=nv12' `
+                    -c:v hevc_nvenc -profile:v main -f null - 2>$null
+                $script:NvencWorks = ($LASTEXITCODE -eq 0)
+            }
+        }
         if ($enc -match 'hevc_qsv') {
             # prova reale: un encode minuscolo, perche' la build puo' avere QSV ma la GPU no
             & ffmpeg -hide_banner -loglevel error -f lavfi -i 'color=c=black:s=1280x720:d=0.2' -vf 'format=p010le' `
@@ -175,11 +361,13 @@ function Test-Tools {
 
 function Resolve-Encoder {
     switch ($script:Cfg.Encoder) {
-        'qsv'  { if ($script:QsvWorks) { return 'qsv' } else { return $null } }
-        'x265' { if ($script:HasX265) { return 'x265' } else { return $null } }
+        'nvenc' { if ($script:NvencWorks) { return 'nvenc' } else { return $null } }
+        'qsv'   { if ($script:QsvWorks)   { return 'qsv' }   else { return $null } }
+        'x265'  { if ($script:HasX265)    { return 'x265' }  else { return $null } }
         default {
-            if ($script:QsvWorks) { return 'qsv' }
-            if ($script:HasX265)  { return 'x265' }
+            if ($script:NvencWorks) { return 'nvenc' }
+            if ($script:QsvWorks)   { return 'qsv' }
+            if ($script:HasX265)    { return 'x265' }
             return $null
         }
     }
@@ -276,7 +464,7 @@ function Get-MediaFiles([string]$Kind = 'video') {
 #  ENCODE
 # ----------------------------------------------------------------------------
 function Invoke-Encode {
-    param([string]$Src, [string]$Dst, $Info, [string]$Enc, [int]$Q)
+    param([string]$Src, [string]$Dst, $Info, [string]$Enc, [int]$Q, [double]$Duration = 0)
 
     $part = "$Dst.part"
     $fmt  = if ([IO.Path]::GetExtension($Dst).ToLower() -eq '.mov') { 'mov' } else { 'mp4' }
@@ -284,32 +472,45 @@ function Invoke-Encode {
     $chromaNon420 = ("$($Info.PixFmt)" -match '422|444')   # es. Sony XAVC HS 4:2:2: si converte a 4:2:0
 
     $base = @('-hide_banner', '-loglevel', 'error', '-stats', '-y')
-    # 0:V = solo video "vero" (esclude la copertina JPEG); -dn = niente tracce dati DJI (il muxer MP4 le rifiuta)
+    # 0:V:0 = solo video "vero" (esclude la copertina JPEG); -dn = niente tracce dati DJI (il muxer MP4 le rifiuta)
     $maps = @('-map', '0:V:0', '-map', '0:a?', '-dn', '-map_metadata', '0')
     $audio = @('-c:a', 'copy')
     if (Test-AudioToAac $Info) { $audio = @('-c:a', 'aac', '-b:a', "$($script:Cfg.AacBitrate)k") }
     $mux  = @('-movflags', 'use_metadata_tags+faststart', '-tag:v', 'hvc1') +
             @(Get-ColorArgs $Info) + $audio + @('-f', $fmt)
+    $durArg = if ($Duration -gt 0) { @('-t', "$Duration") } else { @() }
 
     $attempts = @()
-    if ($Enc -eq 'qsv') {
+    if ($Enc -eq 'nvenc') {
+        $prof  = if ($is10) { 'main10' } else { 'main' }
+        $swFmt = if ($is10) { 'p010le' } else { 'nv12' }
+        $preset = if ($script:Cfg.NvencPreset) { $script:Cfg.NvencPreset } else { 'p7' }
+        $vencHq = @('-c:v', 'hevc_nvenc', '-profile:v', $prof, '-preset', $preset,
+                    '-tune', 'hq', '-rc', 'vbr', '-cq', "$Q", '-b:v', '0',
+                    '-multipass', 'fullres', '-rc-lookahead', '32', '-spatial-aq', '1', '-temporal-aq', '1')
+        $vencSafe = @('-c:v', 'hevc_nvenc', '-profile:v', $prof, '-preset', $preset,
+                      '-rc', 'vbr', '-cq', "$Q", '-b:v', '0')
+        if (-not $chromaNon420) {
+            $attempts += , @{ Pre = @('-hwaccel', 'cuda', '-hwaccel_output_format', 'cuda'); Vf = @(); Venc = $vencHq }
+        }
+        $attempts += , @{ Pre = @(); Vf = @('-vf', "format=$swFmt"); Venc = $vencHq }
+        $attempts += , @{ Pre = @(); Vf = @('-vf', "format=$swFmt"); Venc = $vencSafe }
+    } elseif ($Enc -eq 'qsv') {
         $prof  = if ($is10) { 'main10' } else { 'main' }
         $swFmt = if ($is10) { 'p010le' } else { 'nv12' }
         $venc  = @('-c:v', 'hevc_qsv', '-profile:v', $prof, '-preset', 'veryslow',
                    '-global_quality', "$Q", '-look_ahead', '1')
-        # tentativo 1: decodifica + encode tutto su GPU; tentativo 2: decodifica software (fallback)
-        # con 4:2:2/4:4:4 salto il percorso GPU completo e uso decodifica software + conversione 4:2:0
-        if (-not $chromaNon420) { $attempts += , @{ Pre = @('-hwaccel', 'qsv', '-hwaccel_output_format', 'qsv'); Vf = @() } }
-        $attempts += , @{ Pre = @(); Vf = @('-vf', "format=$swFmt") }
+        if (-not $chromaNon420) { $attempts += , @{ Pre = @('-hwaccel', 'qsv', '-hwaccel_output_format', 'qsv'); Vf = @(); Venc = $venc } }
+        $attempts += , @{ Pre = @(); Vf = @('-vf', "format=$swFmt"); Venc = $venc }
     } else {
         $pix  = if ($chromaNon420) { if ($is10) { 'yuv420p10le' } else { 'yuv420p' } } elseif ($Info.PixFmt) { $Info.PixFmt } else { 'yuv420p10le' }
         $venc = @('-c:v', 'libx265', '-preset', $script:Cfg.X265Preset, '-crf', "$Q", '-pix_fmt', $pix, '-x265-params', 'log-level=error')
-        $attempts += , @{ Pre = @(); Vf = @() }
+        $attempts += , @{ Pre = @(); Vf = @(); Venc = $venc }
     }
 
     try {
         foreach ($a in $attempts) {
-            $ffArgs = $base + $a.Pre + @('-i', $Src) + $maps + $a.Vf + $venc + $mux + @($part)
+            $ffArgs = $base + $a.Pre + @('-i', $Src) + $maps + $a.Vf + $a.Venc + $mux + $durArg + @($part)
             & ffmpeg @ffArgs
             if ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $part)) {
                 Move-Item -LiteralPath $part -Destination $Dst -Force
@@ -319,7 +520,6 @@ function Invoke-Encode {
         }
         return $false
     } finally {
-        # Ctrl+C o errore: non lasciare mai file parziali in giro
         if (Test-Path -LiteralPath $part) { Remove-Item -LiteralPath $part -Force -ErrorAction SilentlyContinue }
     }
 }
@@ -327,15 +527,22 @@ function Invoke-Encode {
 # ----------------------------------------------------------------------------
 #  VMAF  (primo input = compresso, secondo = originale)
 # ----------------------------------------------------------------------------
-function Measure-Vmaf([string]$Dist, [string]$Ref, [int]$Sub) {
+function Measure-Vmaf([string]$Dist, [string]$Ref, [int]$Sub, [double]$Duration = 0) {
     $threads = [Environment]::ProcessorCount
     $filter  = "[0:v:0][1:v:0]libvmaf=n_threads=${threads}:n_subsample=${Sub}"
-    # prima prova con decodifica su GPU (lascia la CPU libera per VMAF), poi fallback software
-    $modes = if ($script:QsvWorks) { @($true, $false) } else { @($false) }
-    foreach ($hw in $modes) {
-        $pre = if ($hw) { @('-hwaccel', 'qsv') } else { @() }
+    $hwaccels = @()
+    if ($script:NvencWorks) { $hwaccels += 'cuda' }
+    if ($script:QsvWorks)   { $hwaccels += 'qsv' }
+    $hwaccels += 'none'
+
+    $durArg = if ($Duration -gt 0) { @('-t', "$Duration") } else { @() }
+
+    foreach ($hw in $hwaccels) {
+        $pre = if ($hw -eq 'cuda') { @('-hwaccel', 'cuda') }
+               elseif ($hw -eq 'qsv') { @('-hwaccel', 'qsv') }
+               else { @() }
         $ffArgs = @('-hide_banner', '-nostats') + $pre + @('-i', $Dist) + $pre + @('-i', $Ref) +
-                  @('-lavfi', $filter, '-an', '-sn', '-dn', '-f', 'null', '-')
+                  $durArg + @('-lavfi', $filter, '-an', '-sn', '-dn', '-f', 'null', '-')
         $lines = & ffmpeg @ffArgs 2>&1 | ForEach-Object { "$_" }
         $m = $lines | Select-String 'VMAF score:\s*([\d\.,]+)'
         if ($m) {
@@ -352,7 +559,7 @@ function Measure-Vmaf([string]$Dist, [string]$Ref, [int]$Sub) {
 function Invoke-VideoJob {
     param([IO.FileInfo]$File, [string]$Mode, [string]$Enc, [string]$SrcRoot, [string]$OutRoot)
 
-    $rel = $File.FullName.Substring($SrcRoot.Length).TrimStart('\')
+    $rel = $File.FullName.Substring($SrcRoot.Length).TrimStart('\', '/')
     $dst = Join-Path $OutRoot $rel
     $row = [ordered]@{ File = $rel; InMB = [math]::Round($File.Length / 1MB, 1); OutMB = $null
                        Saved = $null; Quality = '-'; VMAF = $null; Audio = '-'; Status = '' }
@@ -360,10 +567,19 @@ function Invoke-VideoJob {
     $info = Get-VideoInfo $File.FullName
     if (-not $info) { $row.Status = 'ERRORE: nessun video'; return [pscustomobject]$row }
 
-    $isQsv = ($Enc -eq 'qsv')
-    $q     = if ($isQsv) { [int]$script:Cfg.QsvQuality } else { [int]$script:Cfg.X265Crf }
-    $qMin  = if ($isQsv) { 15 } else { 12 }
-    $qStep = if ($isQsv) { 3 } else { 2 }
+    if ($Enc -eq 'nvenc') {
+        $q     = [int]$script:Cfg.NvencCq
+        $qMin  = 14
+        $qStep = 3
+    } elseif ($Enc -eq 'qsv') {
+        $q     = [int]$script:Cfg.QsvQuality
+        $qMin  = 15
+        $qStep = 3
+    } else {
+        $q     = [int]$script:Cfg.X265Crf
+        $qMin  = 12
+        $qStep = 2
+    }
     $exists = Test-Path -LiteralPath $dst
     $encodedNow = $false
 
@@ -373,7 +589,7 @@ function Invoke-VideoJob {
         $row.Status = 'ESISTENTE'
     } else {
         New-Item -ItemType Directory -Force -Path (Split-Path $dst) | Out-Null
-        Write-Host ("   encode q={0} ..." -f $q) -ForegroundColor DarkGray
+        Write-Host ("   encode q={0} ({1}) ..." -f $q, $Enc) -ForegroundColor DarkGray
         if ("$($info.PixFmt)" -match '422|444') {
             Write-Host ("   nota: sorgente {0} -> convertita a 4:2:0 (compatibile con tutti i player)" -f $info.PixFmt) -ForegroundColor Yellow
         }
@@ -465,8 +681,6 @@ function Invoke-PhotoEncode([string]$Src, [string]$Dst, $Info, [int]$Q) {
 }
 
 # SSIM tra compresso ($A) e originale ($B): 1.0 = identico.
-# ImageMagick 7 recente stampa "<valore> (<distanza normalizzata>)" dove la distanza e' (1-SSIM)/2 (0 = identico):
-# in quel caso SSIM = 1 - 2*distanza. Se invece stampa un solo numero lo si usa direttamente come SSIM.
 function Measure-Ssim([string]$A, [string]$B) {
     $lines = & $script:MagickExe compare -metric SSIM $A $B 'null:' 2>&1 | ForEach-Object { "$_" }
     $num = '[0-9]*\.?[0-9]+(?:[eE][-+]?[0-9]+)?'
@@ -537,7 +751,6 @@ function Invoke-PhotoJob {
     } elseif ($exists -and -not $script:Cfg.Overwrite) {
         $row.Status = 'ESISTENTE'
     } else {
-        # gia' compressa almeno quanto il target: ricomprimerla aggiungerebbe solo perdita
         if ($info.Q -gt 0 -and $info.Q -le $q) {
             $row.Status = "GIA COMPRESSA (Q~$($info.Q))"; $row.Quality = $info.Q
             return [pscustomobject]$row
@@ -608,7 +821,6 @@ $script:RiffInfoMap = @{
     ILNG = 'LANGUAGE'; IBPM = 'BPM'; IKEY = 'KEY'
 }
 
-# Legge i commenti Vorbis di un FLAC (tutti, duplicati inclusi), in ordine
 function Get-FlacComments([string]$Path) {
     $b = [IO.File]::ReadAllBytes($Path)
     $list = New-Object System.Collections.Generic.List[string]
@@ -643,7 +855,6 @@ function Get-FlacComments([string]$Path) {
     return $list.ToArray()
 }
 
-# Legge i tag RIFF INFO di un WAV, mappandoli sulle chiavi Vorbis standard
 function Get-RiffInfoComments([string]$Path) {
     $b = [IO.File]::ReadAllBytes($Path)
     $list = New-Object System.Collections.Generic.List[string]
@@ -687,7 +898,6 @@ function Get-FfprobeComments([string]$Path) {
     return $list.ToArray()
 }
 
-# Commenti del file sorgente: parser nativo (fedele) e, solo se vuoto, fallback ffprobe
 function Get-SourceComments([IO.FileInfo]$File) {
     $ext = $File.Extension.ToLower()
     $c = @()
@@ -697,7 +907,6 @@ function Get-SourceComments([IO.FileInfo]$File) {
     return $c
 }
 
-# Prepara i commenti per Opus: scarta le copertine incorporate, divide gli artisti sul ';'
 function Get-OpusComments([string[]]$Comments) {
     $out = New-Object System.Collections.Generic.List[string]
     foreach ($c in $Comments) {
@@ -718,7 +927,6 @@ function Get-OpusComments([string[]]$Comments) {
     return $out.ToArray()
 }
 
-# Costruisce il pacchetto Vorbis comment "OpusTags" (id venditore riusato + commenti)
 function New-OpusTagsPacket([byte[]]$Vendor, [string[]]$Comments) {
     $ms = New-Object IO.MemoryStream
     $wr = New-Object IO.BinaryWriter($ms)
@@ -735,11 +943,10 @@ function New-OpusTagsPacket([byte[]]$Vendor, [string[]]$Comments) {
     } finally { $wr.Dispose(); $ms.Dispose() }
 }
 
-# CRC-32 di Ogg: polinomio 0x04C11DB7, init 0, non riflesso, nessun xor finale
 function Get-OggCrc32([byte[]]$Data, [int]$Start, [int]$Count) {
     [uint32]$crc = 0
-    $highBit = [uint32]2147483648     # 0x80000000 come uint32 (il literal andrebbe in Int32 negativo)
-    $poly = [uint32]79764919          # 0x04C11DB7
+    $highBit = [uint32]2147483648
+    $poly = [uint32]79764919
     $end = $Start + $Count
     for ($i = $Start; $i -lt $end; $i++) {
         $crc = [uint32]((($crc -bxor ([uint32]([uint32]$Data[$i] -shl 24))) -band 4294967295))
@@ -777,7 +984,6 @@ function Read-OggPages([byte[]]$Bytes) {
     return , $list
 }
 
-# Dalla pagina del pacchetto OpusTags ricava il vendor e quante pagine occupa
 function Get-OpusTagsInfo([byte[]]$Bytes, $Pages, [int]$Idx) {
     $buf = New-Object System.Collections.Generic.List[byte]
     $p = $Idx; $done = $false
@@ -812,7 +1018,6 @@ function New-OggPageBytes([int]$HeaderType, [uint32]$Serial, [uint32]$Seq, [byte
     return $page
 }
 
-# Riscrive i tag di un file Ogg Opus, sostituendo il pacchetto OpusTags
 function Set-OpusTags([string]$Path, [string[]]$Comments) {
     $bytes = [IO.File]::ReadAllBytes($Path)
     $pages = Read-OggPages $bytes
@@ -826,7 +1031,6 @@ function Set-OpusTags([string]$Path, [string[]]$Comments) {
     $info = Get-OpusTagsInfo $bytes $pages $idx
     $packet = New-OpusTagsPacket $info.Vendor $Comments
 
-    # lacing del pacchetto in segmenti da 255 byte
     $lace = New-Object System.Collections.Generic.List[int]
     $rem = $packet.Length
     while ($rem -ge 255) { [void]$lace.Add(255); $rem -= 255 }
@@ -873,7 +1077,6 @@ function Set-OpusTags([string]$Path, [string[]]$Comments) {
     } finally { $ms.Dispose() }
 }
 
-# Estrae la copertina incorporata (FLAC picture) dal file sorgente
 function Extract-AudioCover([string]$Src, [string]$OutDir) {
     $json = & ffprobe -v error -select_streams v -show_entries 'stream=codec_name' -of json $Src 2>$null
     try { $o = ($json -join "`n") | ConvertFrom-Json } catch { return $null }
@@ -886,7 +1089,6 @@ function Extract-AudioCover([string]$Src, [string]$OutDir) {
     return $null
 }
 
-# True se nella cartella esiste gia' un file copertina (nomi/estensioni configurati o cover.*)
 function Test-CoverPresent([string]$Dir) {
     foreach ($n in @($script:Cfg.OpusCoverNames)) {
         foreach ($e in @($script:Cfg.OpusCoverExts)) {
@@ -897,7 +1099,6 @@ function Test-CoverPresent([string]$Dir) {
     return $false
 }
 
-# Copia la copertina affiancata (cover/folder/front/album) o, se assente, la estrae dal file
 function Set-AudioCover([IO.FileInfo]$File, [string]$Dst) {
     $outDir = Split-Path $Dst
     if (Test-CoverPresent $outDir) { return 'presente' }
@@ -1030,35 +1231,51 @@ function Start-Batch([string]$Mode, [string]$Kind = 'video') {
     $outRoot = if ($isAudio) { Get-OpusDir } else { Get-OutDir }
     $totalMB = [math]::Round((($files | Measure-Object Length -Sum).Sum) / 1MB, 1)
 
-    Write-Host ''
-    Write-Host ("File da elaborare : {0}  ({1} MB)" -f $files.Count, $totalMB)
+    Clear-Host
+    Write-BoxTop
+    Write-BoxLine -Text "A V V I O   E L A B O R A Z I O N E   L O T T O" -Align Center -Color Cyan
+    Write-BoxSep
+    Write-BoxLine -Text ("  File da elaborare : {0}  ({1} MB)" -f $files.Count, $totalMB) -Color White
     if ($isPhoto) {
-        Write-Host ("Modalita'         : {0}" -f $(if ($Mode -eq 'verify') { 'solo verifica foto' } else { 'compressione foto' + $(if ($script:Cfg.PhotoVerify) { ' + verifica + retry' } else { ' (senza verifica)' }) }))
-        Write-Host ("JPEG              : qualita' {0}, {1}, croma e metadati dell'originale" -f $script:Cfg.PhotoQuality, $(if ($script:Cfg.PhotoProgressive) { 'progressivo' } else { 'baseline' }))
-        if ($script:Cfg.PhotoVerify) { Write-Host ("Soglia SSIM       : {0}" -f ([double]$script:Cfg.PhotoSsim).ToString('0.000', $script:Inv)) }
+        $modeStr = if ($Mode -eq 'verify') { 'solo verifica foto' } else { 'compressione foto' + $(if ($script:Cfg.PhotoVerify) { ' + verifica + retry' } else { ' (senza verifica)' }) }
+        Write-BoxLine -Text ("  Modalita'         : {0}" -f $modeStr) -Color White
+        Write-BoxLine -Text ("  JPEG              : qualita' {0}, {1}" -f $script:Cfg.PhotoQuality, $(if ($script:Cfg.PhotoProgressive) { 'progressivo' } else { 'baseline' })) -Color Gray
+        if ($script:Cfg.PhotoVerify) {
+            Write-BoxLine -Text ("  Soglia SSIM       : {0}" -f ([double]$script:Cfg.PhotoSsim).ToString('0.000', $script:Inv)) -Color Gray
+        }
     } elseif ($isAudio) {
-        Write-Host  "Modalita'         : conversione audio -> Opus"
-        Write-Host ("Opus              : {0} kb/s VBR" -f $script:Cfg.OpusBitrate)
-        Write-Host  "Metadati          : copiati pari-pari (artisti multipli come tag ARTIST separati)"
-        Write-Host ("Copertina         : {0}" -f $(if ($script:Cfg.OpusCover) { 'copiata/estratta nella cartella opus' } else { 'disattivata' }))
+        Write-BoxLine -Text "  Modalita'         : conversione audio -> Opus" -Color White
+        Write-BoxLine -Text ("  Opus              : {0} kb/s VBR" -f $script:Cfg.OpusBitrate) -Color Gray
+        Write-BoxLine -Text  "  Metadati          : commenti Vorbis copiati fedelmente" -Color Gray
+        Write-BoxLine -Text ("  Copertina         : {0}" -f $(if ($script:Cfg.OpusCover) { 'copiata/estratta nella cartella opus' } else { 'disattivata' })) -Color Gray
     } else {
-        Write-Host ("Modalita'         : {0}" -f @{ compress = 'solo compressione'; full = 'compressione + verifica + retry'; verify = 'solo verifica' }[$Mode])
+        $modeDesc = switch ($Mode) { 'compress' { 'solo compressione' } 'full' { 'compressione + verifica VMAF + retry' } default { 'solo verifica' } }
+        Write-BoxLine -Text ("  Modalita'         : {0}" -f $modeDesc) -Color White
         if ($enc) {
-            $qTxt = if ($enc -eq 'qsv') { "QSV global_quality=$($script:Cfg.QsvQuality)" } else { "x265 crf=$($script:Cfg.X265Crf) preset=$($script:Cfg.X265Preset)" }
-            Write-Host ("Encoder           : {0}" -f $qTxt)
+            $encDesc = switch ($enc) {
+                'nvenc' { "NVIDIA NVENC (CQ $($script:Cfg.NvencCq), preset $($script:Cfg.NvencPreset))" }
+                'qsv'   { "Intel QSV (global_quality $($script:Cfg.QsvQuality))" }
+                default { "x265 (CRF $($script:Cfg.X265Crf), preset $($script:Cfg.X265Preset))" }
+            }
+            Write-BoxLine -Text ("  Encoder           : {0}" -f $encDesc) -Color Gray
         }
         if ($Mode -ne 'verify') {
             $aTxt = switch ($script:Cfg.AudioMode) {
                 'copy'  { 'copia originale' }
                 'aac'   { "AAC $($script:Cfg.AacBitrate)k" }
-                default { "auto (PCM -> AAC $($script:Cfg.AacBitrate)k, altri formati in copia)" }
+                default { "auto (PCM -> AAC $($script:Cfg.AacBitrate)k, altri in copia)" }
             }
-            Write-Host ("Audio             : {0}" -f $aTxt)
+            Write-BoxLine -Text ("  Audio             : {0}" -f $aTxt) -Color Gray
         }
-        if ($Mode -ne 'compress') { Write-Host ("Soglia VMAF       : {0}" -f $script:Cfg.VmafThreshold) }
+        if ($Mode -ne 'compress') {
+            Write-BoxLine -Text ("  Soglia VMAF       : {0}" -f $script:Cfg.VmafThreshold) -Color Gray
+        }
     }
-    Write-Host ("Output            : {0}" -f $outRoot)
-    if ((Read-Default 'Procedo? (s/n)' 's') -notmatch '^[sSyY]') { return }
+    Write-BoxLine -Text ("  Output            : {0}" -f $outRoot) -Color White
+    Write-BoxBottom
+
+    $ans = Read-BoxPrompt "Procedo? (s/n) [s]"
+    if ($ans -and $ans -notmatch '^[sSyY]') { return }
 
     New-Item -ItemType Directory -Force -Path $outRoot | Out-Null
     $results = New-Object System.Collections.Generic.List[object]
@@ -1066,8 +1283,7 @@ function Start-Batch([string]$Mode, [string]$Kind = 'video') {
     $i = 0
     foreach ($f in $files) {
         $i++
-        Write-Host ''
-        Write-Host ("[{0}/{1}] {2}" -f $i, $files.Count, $f.Name) -ForegroundColor Cyan
+        Write-CenteredProgress -Current $i -Total $files.Count -FileName $f.Name
         $r = if ($isPhoto) { Invoke-PhotoJob -File $f -Mode $Mode -SrcRoot $srcRoot -OutRoot $outRoot }
              elseif ($isAudio) { Invoke-AudioJob -File $f -SrcRoot $srcRoot -OutRoot $outRoot }
              else          { Invoke-VideoJob -File $f -Mode $Mode -Enc $enc -SrcRoot $srcRoot -OutRoot $outRoot }
@@ -1080,7 +1296,10 @@ function Start-Batch([string]$Mode, [string]$Kind = 'video') {
 
     # --- riepilogo e log ---
     Write-Host ''
-    Write-Host '================ RIEPILOGO ================' -ForegroundColor Cyan
+    Write-BoxTop
+    Write-BoxLine -Text "R I E P I L O G O   E L A B O R A Z I O N E" -Align Center -Color Cyan
+    Write-BoxBottom
+    Write-Host ''
     $cols = if ($isPhoto) { 'File', 'InMB', 'OutMB', 'Saved', 'Quality', 'SSIM', 'Meta', 'Status' }
             elseif ($isAudio) { 'File', 'InMB', 'OutMB', 'Saved', 'Bitrate', 'Tags', 'Cover', 'Status' }
             else          { 'File', 'InMB', 'OutMB', 'Saved', 'Quality', 'VMAF', 'Audio', 'Status' }
@@ -1110,7 +1329,11 @@ function Show-Scan {
     if (-not (Test-Source)) { return }
     $vids = if ($script:HasFfmpeg) { Get-MediaFiles 'video' } else { @() }
     $pics = if ($script:MagickExe) { Get-MediaFiles 'photo' } else { @() }
-    if ($vids.Count -eq 0 -and $pics.Count -eq 0) { Write-Host 'Nessun file video o JPEG trovato.' -ForegroundColor Yellow; Wait-Enter; return }
+    $auds = if ($script:HasFfmpeg) { Get-MediaFiles 'audio' } else { @() }
+    if ($vids.Count -eq 0 -and $pics.Count -eq 0 -and $auds.Count -eq 0) {
+        Write-Host 'Nessun file video, JPEG o audio trovato nella cartella.' -ForegroundColor Yellow
+        Wait-Enter; return
+    }
 
     if ($vids.Count -gt 0) {
         Write-Host "`nVIDEO" -ForegroundColor Cyan
@@ -1142,10 +1365,146 @@ function Show-Scan {
         Write-Host ("Totale foto: {0} file, {1} MB" -f $pics.Count, [math]::Round((($pics | Measure-Object Length -Sum).Sum) / 1MB, 1))
         Write-Host "Nota: le foto con 'Q stimata' <= qualita' foto impostata vengono saltate (gia' compresse)." -ForegroundColor DarkGray
     }
+    if ($auds.Count -gt 0) {
+        Write-Host "`nAUDIO (WAV / FLAC)" -ForegroundColor Cyan
+        $rows = foreach ($f in $auds) {
+            [pscustomobject]@{
+                File = $f.Name; MB = [math]::Round($f.Length / 1MB, 1)
+                Formato = $f.Extension.ToUpper().TrimStart('.')
+            }
+        }
+        ($rows | Format-Table -AutoSize | Out-String -Width 220).TrimEnd() | Write-Host
+        Write-Host ("Totale audio: {0} file, {1} MB" -f $auds.Count, [math]::Round((($auds | Measure-Object Length -Sum).Sum) / 1MB, 1))
+    }
     Wait-Enter
 }
 
-# Prova su UNA foto: comprime a piu' qualita' e mostra dimensione, SSIM e metadati (come il test VMAF dei video)
+# Prova su UN video: comprime a piu' valori di qualita' (CQ/CRF) su uno spezzone o sull'intero file
+function Show-VideoTest {
+    if (-not $script:HasFfmpeg) {
+        Write-Host 'ffmpeg/ffprobe non trovati nel PATH: test video non disponibile.' -ForegroundColor Red
+        Wait-Enter; return
+    }
+    $enc = Resolve-Encoder
+    if (-not $enc) {
+        Write-Host 'Nessun encoder video disponibile (vedi [6] Impostazioni).' -ForegroundColor Red
+        Wait-Enter; return
+    }
+    if (-not $script:HasVmaf) {
+        Write-Host 'libvmaf non disponibile in ffmpeg: calcolo del punteggio non disponibile.' -ForegroundColor Yellow
+    }
+
+    $default = ''
+    if ($script:Cfg.SourceDir -and (Test-Path -LiteralPath $script:Cfg.SourceDir -PathType Container)) {
+        $first = @(Get-MediaFiles 'video') | Select-Object -First 1
+        if ($first) { $default = $first.FullName }
+    }
+
+    Clear-Host
+    Write-BoxTop
+    Write-BoxLine -Text "TEST QUALITA VIDEO (CONFRONTO CQ / CRF)" -Align Center -Color Cyan
+    Write-BoxSep
+    Write-BoxLine -Text "  Trascina un file video o premi Invio per usare il default." -Color Gray
+    if ($default) {
+        Write-BoxLine -Text ("  Default: {0}" -f (Split-Path $default -Leaf)) -Color DarkCyan
+    }
+    Write-BoxBottom
+
+    $r = Read-BoxPrompt "Video di prova"
+    if ([string]::IsNullOrWhiteSpace($r)) { $r = $default }
+    $r = $r.Trim().Trim('"').Trim("'")
+    if ($r -in 'q', 'annulla', 'exit', '0') { return }
+    if (-not $r -or -not (Test-Path -LiteralPath $r -PathType Leaf)) {
+        Write-Host 'File video non valido o non trovato.' -ForegroundColor Yellow
+        Wait-Enter; return
+    }
+    $f = Get-Item -LiteralPath $r
+    $info = Get-VideoInfo $f.FullName
+    if (-not $info) {
+        Write-Host 'Impossibile leggere le informazioni del video.' -ForegroundColor Red
+        Wait-Enter; return
+    }
+
+    Write-Host ("`n{0}: {1} MB, {2}x{3} @ {4:N2} fps, dur {5:N1}s, croma {6}" -f $f.Name,
+        [math]::Round($f.Length / 1MB, 1), $info.Width, $info.Height, $info.Fps, $info.Duration, $info.PixFmt) -ForegroundColor Cyan
+
+    $durSec = Read-IntRange 'Durata spezzone di test in secondi (0 = intero file)' 10 0 300
+
+    $defQ = if ($enc -in 'nvenc', 'qsv') { '20,23,26,29' } else { '18,20,22,24' }
+    $qPrompt = if ($enc -eq 'nvenc') { "Valori CQ hevc_nvenc da provare" }
+               elseif ($enc -eq 'qsv') { "Valori global_quality QSV da provare" }
+               else { "Valori CRF x265 da provare" }
+
+    $qInput = Read-Default $qPrompt $defQ
+    $list = @()
+    foreach ($t in ($qInput -split ',')) {
+        $n = 0
+        if ([int]::TryParse($t.Trim(), [ref]$n) -and $n -ge 10 -and $n -le 45) { $list += $n }
+    }
+    if ($list.Count -eq 0) {
+        Write-Host 'Nessun valore di qualita valido specificato.' -ForegroundColor Yellow
+        Wait-Enter; return
+    }
+
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) 'squeeze-video-test'
+    New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+    try {
+        $rows = @()
+        $idx = 0
+        foreach ($q in $list) {
+            $idx++
+            Write-CenteredProgress -Current $idx -Total $list.Count -FileName ("Test q={0} ({1})" -f $q, $enc)
+            $outName = "test_q{0}{1}" -f $q, $f.Extension
+            $dst = Join-Path $tmp $outName
+
+            if (-not (Invoke-Encode -Src $f.FullName -Dst $dst -Info $info -Enc $enc -Q $q -Duration $durSec)) {
+                Write-Host ("   errore nella codifica a q={0}" -f $q) -ForegroundColor Red
+                continue
+            }
+
+            $outLen = (Get-Item -LiteralPath $dst).Length
+            $clipMB = [math]::Round($outLen / 1MB, 2)
+
+            $estTotalMB = $clipMB
+            $estSaved = 0
+            if ($durSec -gt 0 -and $info.Duration -gt $durSec) {
+                $estTotalBytes = ($outLen / $durSec) * $info.Duration
+                $estTotalMB = [math]::Round($estTotalBytes / 1MB, 1)
+                $estSaved = [math]::Round((1 - ($estTotalBytes / $f.Length)) * 100, 0)
+            } else {
+                $estTotalMB = [math]::Round($outLen / 1MB, 1)
+                $estSaved = [math]::Round((1 - ($outLen / $f.Length)) * 100, 0)
+            }
+
+            $vmaf = $null
+            if ($script:HasVmaf) {
+                Write-Host '   calcolo VMAF ...' -ForegroundColor DarkGray
+                $vmaf = Measure-Vmaf -Dist $dst -Ref $f.FullName -Sub $script:Cfg.VmafSubsample -Duration $durSec
+            }
+
+            $rows += [pscustomobject]@{
+                'CQ/CRF'      = $q
+                'Clip MB'     = $clipMB
+                'Est Totale'  = ("{0} MB" -f $estTotalMB)
+                'Risparmio'   = ("{0}%" -f $estSaved)
+                'VMAF'        = if ($null -ne $vmaf) { [math]::Round($vmaf, 2) } else { 'n/d' }
+            }
+        }
+
+        Write-Host ''
+        Write-BoxTop
+        Write-BoxLine -Text "R I S U L T A T I   T E S T   V I D E O" -Align Center -Color Cyan
+        Write-BoxBottom
+        Write-Host ''
+        ($rows | Format-Table -AutoSize | Out-String -Width 220).TrimEnd() | Write-Host
+        Write-Host "`nScegli il valore con VMAF sopra la tua soglia (es. 96) e impostalo in [6] Impostazioni." -ForegroundColor DarkGray
+    } finally {
+        Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Wait-Enter
+}
+
+# Prova su UNA foto: comprime a piu' qualita' e mostra dimensione, SSIM e metadati
 function Show-PhotoTest {
     if (-not $script:MagickExe) { Write-Host 'ImageMagick non trovato.' -ForegroundColor Red; Wait-Enter; return }
     $default = ''
@@ -1153,10 +1512,23 @@ function Show-PhotoTest {
         $first = @(Get-MediaFiles 'photo') | Select-Object -First 1
         if ($first) { $default = $first.FullName }
     }
-    $r = Read-Default 'Foto di prova (trascina il file qui)' $default
+
+    Clear-Host
+    Write-BoxTop
+    Write-BoxLine -Text "TEST QUALITA FOTO (CONFRONTO Q)" -Align Center -Color Cyan
+    Write-BoxSep
+    Write-BoxLine -Text "  Trascina una foto o premi Invio per usare il default." -Color Gray
+    if ($default) {
+        Write-BoxLine -Text ("  Default: {0}" -f (Split-Path $default -Leaf)) -Color DarkCyan
+    }
+    Write-BoxBottom
+
+    $r = Read-BoxPrompt "Foto di prova"
+    if ([string]::IsNullOrWhiteSpace($r)) { $r = $default }
     $r = $r.Trim().Trim('"').Trim("'")
+    if ($r -in 'q', 'annulla', 'exit', '0') { return }
     if (-not $r -or -not (Test-Path -LiteralPath $r -PathType Leaf)) {
-        Write-Host 'File non valido.' -ForegroundColor Yellow; Wait-Enter; return
+        Write-Host 'File non valido o non trovato.' -ForegroundColor Yellow; Wait-Enter; return
     }
     $f = Get-Item -LiteralPath $r
     $info = Get-PhotoInfo $f.FullName
@@ -1168,45 +1540,92 @@ function Show-PhotoTest {
         $n = 0
         if ([int]::TryParse($t.Trim(), [ref]$n) -and $n -ge 40 -and $n -le 100) { $list += $n }
     }
-    if ($list.Count -eq 0) { return }
+    if ($list.Count -eq 0) {
+        Write-Host 'Nessun valore di qualita valido specificato.' -ForegroundColor Yellow
+        Wait-Enter; return
+    }
 
     $tmp = Join-Path ([IO.Path]::GetTempPath()) 'squeeze-test'
     New-Item -ItemType Directory -Force -Path $tmp | Out-Null
-    $rows = foreach ($q in $list) {
-        $o = Join-Path $tmp ("q{0}.jpg" -f $q)
-        Write-Host ("  provo Q={0} ..." -f $q) -ForegroundColor DarkGray
-        if (-not (Invoke-PhotoEncode -Src $f.FullName -Dst $o -Info $info -Q $q)) { continue }
-        $len = (Get-Item -LiteralPath $o).Length
-        $ssim = Measure-Ssim $o $f.FullName
-        $meta = Test-PhotoMetadata $f.FullName $o
-        [pscustomobject]@{
-            Quality = $q; MB = [math]::Round($len / 1MB, 2)
-            Risparmio = ('{0}%' -f [math]::Round((1 - $len / $f.Length) * 100, 0))
-            SSIM = if ($null -ne $ssim) { [math]::Round($ssim, 4) } else { $null }
-            Metadati = $meta.Text
+    try {
+        $rows = foreach ($q in $list) {
+            $o = Join-Path $tmp ("q{0}.jpg" -f $q)
+            Write-Host ("  provo Q={0} ..." -f $q) -ForegroundColor DarkGray
+            if (-not (Invoke-PhotoEncode -Src $f.FullName -Dst $o -Info $info -Q $q)) { continue }
+            $len = (Get-Item -LiteralPath $o).Length
+            $ssim = Measure-Ssim $o $f.FullName
+            $meta = Test-PhotoMetadata $f.FullName $o
+            [pscustomobject]@{
+                Quality = $q; MB = [math]::Round($len / 1MB, 2)
+                Risparmio = ('{0}%' -f [math]::Round((1 - $len / $f.Length) * 100, 0))
+                SSIM = if ($null -ne $ssim) { [math]::Round($ssim, 4) } else { $null }
+                Metadati = $meta.Text
+            }
         }
+        Write-Host ''
+        Write-BoxTop
+        Write-BoxLine -Text "R I S U L T A T I   T E S T   F O T O" -Align Center -Color Cyan
+        Write-BoxBottom
+        Write-Host ''
+        ($rows | Format-Table -AutoSize | Out-String -Width 220).TrimEnd() | Write-Host
+        Write-Host "`nScegli la qualita' piu' bassa con SSIM sopra la tua soglia (e Metadati OK), poi impostala in [6] -> G/H." -ForegroundColor DarkGray
+    } finally {
+        Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
     }
-    Write-Host ''
-    ($rows | Format-Table -AutoSize | Out-String -Width 220).TrimEnd() | Write-Host
-    Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
-    Write-Host "`nScegli la qualita' piu' bassa con SSIM sopra la tua soglia (e Metadati OK), poi impostala in [6] -> G/H." -ForegroundColor DarkGray
     Wait-Enter
 }
 
 # ----------------------------------------------------------------------------
-#  TUI
+#  TUI INTERATTIVA
 # ----------------------------------------------------------------------------
 function Select-Folder {
-    Write-Host ''
-    Write-Host 'Trascina qui la cartella (o incolla il percorso). Invio vuoto = annulla.'
-    $r = Read-Host 'Cartella'
-    if ([string]::IsNullOrWhiteSpace($r)) { return }
-    $r = $r.Trim().Trim('"').Trim("'").TrimEnd('\')
+    Clear-Host
+    Write-BoxTop
+    Write-BoxLine -Text "SELEZIONE CARTELLA SORGENTE" -Align Center -Color Cyan
+    Write-BoxSep
+    Write-BoxLine -Text "  Trascina o incolla qui il percorso di una cartella." -Color Gray
+    Write-BoxLine -Text "  OPPURE premi direttamente INVIO per aprire la finestra di selezione." -Color Yellow
+    Write-BoxLine -Text "  (Scrivi 'q' o 'annulla' per uscire senza modificare)" -Color DarkGray
+    Write-BoxBottom
+
+    $r = Read-BoxPrompt "Cartella"
+    if ($r -in 'q', 'annulla', 'exit', '0') { return }
+
+    if ([string]::IsNullOrWhiteSpace($r)) {
+        try {
+            Add-Type -AssemblyName System.Windows.Forms
+            $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+            $dialog.Description = "Scegli la cartella contenente i file multimediali per Squeeze"
+            $dialog.ShowNewFolderButton = $false
+            if ($script:Cfg.SourceDir -and (Test-Path -LiteralPath $script:Cfg.SourceDir -PathType Container)) {
+                $dialog.SelectedPath = $script:Cfg.SourceDir
+            }
+            $form = New-Object System.Windows.Forms.Form
+            $form.TopMost = $true
+            $dialogResult = $dialog.ShowDialog($form)
+            $form.Dispose()
+            if ($dialogResult -eq [System.Windows.Forms.DialogResult]::OK -and $dialog.SelectedPath) {
+                $r = $dialog.SelectedPath
+            } else {
+                $dialog.Dispose()
+                return
+            }
+            $dialog.Dispose()
+        } catch {
+            Write-Host "Impossibile aprire la finestra di selezione grafica." -ForegroundColor Yellow
+            Wait-Enter
+            return
+        }
+    }
+
+    $r = $r.Trim().Trim('"').Trim("'").TrimEnd('\', '/')
     if (Test-Path -LiteralPath $r -PathType Container) {
         $script:Cfg.SourceDir = (Resolve-Path -LiteralPath $r).Path.TrimEnd('\')
         Save-Config
+        Write-Host "`nCartella impostata: $($script:Cfg.SourceDir)" -ForegroundColor Green
+        Start-Sleep -Milliseconds 800
     } else {
-        Write-Host 'Percorso non valido.' -ForegroundColor Yellow
+        Write-Host "`nPercorso non valido o cartella non trovata." -ForegroundColor Yellow
         Wait-Enter
     }
 }
@@ -1214,50 +1633,72 @@ function Select-Folder {
 function Show-SettingsMenu {
     while ($true) {
         Clear-Host
-        Write-Host '=============== IMPOSTAZIONI ===============' -ForegroundColor Cyan
-        Write-Host (" [1] Encoder              : {0}   (auto = QSV se funziona, altrimenti x265)" -f $script:Cfg.Encoder)
-        Write-Host (" [2] Qualita' QSV         : {0}   (24 = archivio, 21 = piu' sicuro, 27 = compatto)" -f $script:Cfg.QsvQuality)
-        Write-Host (" [3] Qualita' x265 (CRF)  : {0}   (20 = archivio, 18 = piu' sicuro, 22 = compatto)" -f $script:Cfg.X265Crf)
-        Write-Host (" [4] Preset x265          : {0}" -f $script:Cfg.X265Preset)
-        Write-Host (" [5] Soglia VMAF          : {0}" -f $script:Cfg.VmafThreshold)
-        Write-Host (" [6] Precisione VMAF      : 1 frame ogni {0}  (1 = tutti, piu' lento)" -f $script:Cfg.VmafSubsample)
-        Write-Host (" [7] Retry automatico     : {0}   (max {1} tentativi, scende di qualita' a ogni giro)" -f (Format-OnOff $script:Cfg.AutoRetry), $script:Cfg.MaxRetries)
-        Write-Host (" [8] Includi sottocartelle: {0}" -f (Format-OnOff $script:Cfg.Recurse))
-        Write-Host (" [9] Sovrascrivi output   : {0}" -f (Format-OnOff $script:Cfg.Overwrite))
-        Write-Host (" [A] Conserva date file   : {0}" -f (Format-OnOff $script:Cfg.PreserveDates))
-        Write-Host (" [B] Cartella output      : {0}" -f $(if ($script:Cfg.OutDir) { $script:Cfg.OutDir } else { '<sorgente>\out' }))
-        Write-Host (" [C] Audio                : {0}   (auto = PCM -> AAC, altri formati in copia)" -f $script:Cfg.AudioMode)
-        Write-Host (" [D] Bitrate AAC          : {0} kb/s" -f $script:Cfg.AacBitrate)
-        Write-Host (" [E] xvYCC -> bt709 (Sony): {0}   (solo etichetta colore, pixel invariati)" -f (Format-OnOff $script:Cfg.NormalizeXvYCC))
-        Write-Host (" [F] Copia XML/SRT/XMP    : {0}" -f (Format-OnOff $script:Cfg.CopySidecars))
-        Write-Host (" [G] Qualita' foto (JPEG) : {0}   (90 = archivio; piu' basso = file piu' piccoli)" -f $script:Cfg.PhotoQuality)
-        Write-Host (" [H] Soglia SSIM foto     : {0}   (sotto la soglia la foto viene rifatta a Q piu' alta)" -f ([double]$script:Cfg.PhotoSsim).ToString('0.000', $script:Inv))
-        Write-Host (" [I] JPEG progressivo     : {0}" -f (Format-OnOff $script:Cfg.PhotoProgressive))
-        Write-Host (" [J] Verifica foto        : {0}   (SSIM + confronto metadati)" -f (Format-OnOff $script:Cfg.PhotoVerify))
-        Write-Host (" [K] Bitrate Opus         : {0} kb/s   (VBR, minimo 128; audio WAV/FLAC -> Opus)" -f $script:Cfg.OpusBitrate)
-        Write-Host (" [L] Copertina audio      : {0}   (copia/estrai cover nella cartella opus)" -f (Format-OnOff $script:Cfg.OpusCover))
-        Write-Host ' [P] Preset rapidi (Sicuro / Archivio / Compatto)'
-        Write-Host ' [0] Indietro'
-        $c = (Read-Host 'Scelta').Trim().ToUpper()
+        Write-BoxTop
+        Write-BoxLine -Text "I M P O S T A Z I O N I" -Align Center -Color Cyan
+        Write-BoxSep
+
+        Write-BoxLine -Text "  VIDEO" -Color DarkCyan
+        Write-BoxLine -Text ("   [1] Encoder scelto        : {0}  (auto | nvenc | qsv | x265)" -f $script:Cfg.Encoder) -Color White
+        Write-BoxLine -Text ("   [2] Qualita' NVENC (CQ)   : {0}  (24 archivio, 21 sicuro, 27 compatto)" -f $script:Cfg.NvencCq) -Color White
+        Write-BoxLine -Text ("   [3] Preset NVENC          : {0}  (p1 piu' veloce ... p7 piu' lento HQ)" -f $script:Cfg.NvencPreset) -Color White
+        Write-BoxLine -Text ("   [4] Qualita' QSV          : {0}  (24 archivio, 21 sicuro, 27 compatto)" -f $script:Cfg.QsvQuality) -Color White
+        Write-BoxLine -Text ("   [5] Qualita' x265 (CRF)   : {0}  (20 archivio, 18 sicuro, 22 compatto)" -f $script:Cfg.X265Crf) -Color White
+        Write-BoxLine -Text ("   [6] Preset x265           : {0}" -f $script:Cfg.X265Preset) -Color White
+        Write-BoxLine -Text ("   [7] Soglia VMAF           : {0}" -f $script:Cfg.VmafThreshold) -Color White
+        Write-BoxLine -Text ("   [8] Precisione VMAF       : 1 frame ogni {0}" -f $script:Cfg.VmafSubsample) -Color White
+        Write-BoxLine -Text ("   [9] Retry automatico      : {0}  (max {1} tentativi)" -f (Format-OnOff $script:Cfg.AutoRetry), $script:Cfg.MaxRetries) -Color White
+
+        Write-BoxLine -Text "  FOTO (JPEG)" -Color DarkCyan
+        Write-BoxLine -Text ("   [G] Qualita' foto (JPEG)  : {0}  (90 archivio; piu' basso = piu' piccolo)" -f $script:Cfg.PhotoQuality) -Color White
+        Write-BoxLine -Text ("   [H] Soglia SSIM foto      : {0}" -f ([double]$script:Cfg.PhotoSsim).ToString('0.000', $script:Inv)) -Color White
+        Write-BoxLine -Text ("   [I] JPEG progressivo      : {0}" -f (Format-OnOff $script:Cfg.PhotoProgressive)) -Color White
+        Write-BoxLine -Text ("   [J] Verifica foto         : {0}  (SSIM + confronto metadati)" -f (Format-OnOff $script:Cfg.PhotoVerify)) -Color White
+
+        Write-BoxLine -Text "  AUDIO" -Color DarkCyan
+        Write-BoxLine -Text ("   [C] Audio video           : {0}  (auto: PCM->AAC, altri in copia)" -f $script:Cfg.AudioMode) -Color White
+        Write-BoxLine -Text ("   [D] Bitrate AAC           : {0} kb/s" -f $script:Cfg.AacBitrate) -Color White
+        Write-BoxLine -Text ("   [K] Bitrate Opus          : {0} kb/s (WAV/FLAC -> Opus)" -f $script:Cfg.OpusBitrate) -Color White
+        Write-BoxLine -Text ("   [L] Copertina audio       : {0}  (copia/estrai cover in opus/)" -f (Format-OnOff $script:Cfg.OpusCover)) -Color White
+
+        Write-BoxLine -Text "  GENERALE E SOTTOCARTELLE" -Color DarkCyan
+        Write-BoxLine -Text ("   [A] Includi sottocartelle : {0}" -f (Format-OnOff $script:Cfg.Recurse)) -Color White
+        Write-BoxLine -Text ("   [B] Sovrascrivi output    : {0}" -f (Format-OnOff $script:Cfg.Overwrite)) -Color White
+        Write-BoxLine -Text ("   [M] Conserva date file    : {0}" -f (Format-OnOff $script:Cfg.PreserveDates)) -Color White
+        $outStr = if ($script:Cfg.OutDir) { $script:Cfg.OutDir } else { '<sorgente>\out' }
+        Write-BoxLine -Text ("   [N] Cartella output       : {0}" -f $outStr) -Color White
+        Write-BoxLine -Text ("   [E] xvYCC -> bt709 (Sony) : {0}  (solo etichetta colore)" -f (Format-OnOff $script:Cfg.NormalizeXvYCC)) -Color White
+        Write-BoxLine -Text ("   [F] Copia XML/SRT/XMP     : {0}" -f (Format-OnOff $script:Cfg.CopySidecars)) -Color White
+
+        Write-BoxLine -Text "  PRESET E USCITA" -Color DarkCyan
+        Write-BoxLine -Text  "   [P] Preset rapidi (Sicuro / Archivio / Compatto)" -Color Yellow
+        Write-BoxLine -Text  "   [0] Salva e torna al menu principale" -Color Cyan
+        Write-BoxBottom
+
+        $c = (Read-BoxPrompt "Scelta").ToUpper()
         switch ($c) {
-            '1' { $script:Cfg.Encoder = switch (Read-Default 'Encoder (auto/qsv/x265)' $script:Cfg.Encoder) { 'qsv' { 'qsv' } 'x265' { 'x265' } default { 'auto' } } }
-            '2' { $script:Cfg.QsvQuality = Read-IntRange 'Qualita QSV' $script:Cfg.QsvQuality 10 40 }
-            '3' { $script:Cfg.X265Crf = Read-IntRange 'CRF x265' $script:Cfg.X265Crf 10 35 }
-            '4' {
-                $p = Read-Default 'Preset (ultrafast superfast veryfast faster fast medium slow slower)' $script:Cfg.X265Preset
+            '1' { $script:Cfg.Encoder = switch (Read-Default 'Encoder (auto/nvenc/qsv/x265)' $script:Cfg.Encoder) { 'nvenc' { 'nvenc' } 'qsv' { 'qsv' } 'x265' { 'x265' } default { 'auto' } } }
+            '2' { $script:Cfg.NvencCq = Read-IntRange 'Qualita NVENC (CQ)' $script:Cfg.NvencCq 10 40 }
+            '3' {
+                $p = Read-Default 'Preset NVENC (p1 p2 p3 p4 p5 p6 p7)' $script:Cfg.NvencPreset
+                if ($p -in 'p1','p2','p3','p4','p5','p6','p7') { $script:Cfg.NvencPreset = $p }
+            }
+            '4' { $script:Cfg.QsvQuality = Read-IntRange 'Qualita QSV' $script:Cfg.QsvQuality 10 40 }
+            '5' { $script:Cfg.X265Crf = Read-IntRange 'CRF x265' $script:Cfg.X265Crf 10 35 }
+            '6' {
+                $p = Read-Default 'Preset x265 (ultrafast superfast veryfast faster fast medium slow slower)' $script:Cfg.X265Preset
                 if ($p -in 'ultrafast','superfast','veryfast','faster','fast','medium','slow','slower') { $script:Cfg.X265Preset = $p }
             }
-            '5' { $script:Cfg.VmafThreshold = Read-IntRange 'Soglia VMAF' $script:Cfg.VmafThreshold 80 99 }
-            '6' { $script:Cfg.VmafSubsample = Read-IntRange 'Analizza 1 frame ogni N' $script:Cfg.VmafSubsample 1 30 }
-            '7' {
+            '7' { $script:Cfg.VmafThreshold = Read-IntRange 'Soglia VMAF' $script:Cfg.VmafThreshold 80 99 }
+            '8' { $script:Cfg.VmafSubsample = Read-IntRange 'Analizza 1 frame ogni N' $script:Cfg.VmafSubsample 1 30 }
+            '9' {
                 $script:Cfg.AutoRetry = -not $script:Cfg.AutoRetry
                 if ($script:Cfg.AutoRetry) { $script:Cfg.MaxRetries = Read-IntRange 'Tentativi massimi' $script:Cfg.MaxRetries 1 5 }
             }
-            '8' { $script:Cfg.Recurse = -not $script:Cfg.Recurse }
-            '9' { $script:Cfg.Overwrite = -not $script:Cfg.Overwrite }
-            'A' { $script:Cfg.PreserveDates = -not $script:Cfg.PreserveDates }
-            'B' {
-                $r = (Read-Host 'Percorso output (vuoto = <sorgente>\out)').Trim().Trim('"')
+            'A' { $script:Cfg.Recurse = -not $script:Cfg.Recurse }
+            'B' { $script:Cfg.Overwrite = -not $script:Cfg.Overwrite }
+            'M' { $script:Cfg.PreserveDates = -not $script:Cfg.PreserveDates }
+            'N' {
+                $r = (Read-Host 'Percorso output (vuoto = <sorgente>\out)').Trim().Trim('"').Trim("'")
                 $script:Cfg.OutDir = $r
             }
             'C' { $script:Cfg.AudioMode = switch (Read-Default 'Audio (auto/copy/aac)' $script:Cfg.AudioMode) { 'copy' { 'copy' } 'aac' { 'aac' } default { 'auto' } } }
@@ -1276,13 +1717,13 @@ function Show-SettingsMenu {
             'K' { $script:Cfg.OpusBitrate = Read-IntRange 'Bitrate Opus kb/s' $script:Cfg.OpusBitrate 128 512 }
             'L' { $script:Cfg.OpusCover = -not $script:Cfg.OpusCover }
             'P' {
-                Write-Host ' 1 = Sicuro   (QSV 21, x265 CRF 18, soglia 97 | foto Q93, SSIM 0.993)'
-                Write-Host ' 2 = Archivio (QSV 24, x265 CRF 20, soglia 96 | foto Q90, SSIM 0.990)  <- consigliato'
-                Write-Host ' 3 = Compatto (QSV 27, x265 CRF 22, soglia 95 | foto Q85, SSIM 0.985)'
+                Write-Host ' 1 = Sicuro   (NVENC CQ 21, QSV 21, x265 CRF 18, VMAF 97 | foto Q93, SSIM 0.993)'
+                Write-Host ' 2 = Archivio (NVENC CQ 24, QSV 24, x265 CRF 20, VMAF 96 | foto Q90, SSIM 0.990)  <- consigliato'
+                Write-Host ' 3 = Compatto (NVENC CQ 27, QSV 27, x265 CRF 22, VMAF 95 | foto Q85, SSIM 0.985)'
                 switch (Read-Host 'Preset') {
-                    '1' { $script:Cfg.QsvQuality = 21; $script:Cfg.X265Crf = 18; $script:Cfg.VmafThreshold = 97; $script:Cfg.PhotoQuality = 93; $script:Cfg.PhotoSsim = 0.993 }
-                    '2' { $script:Cfg.QsvQuality = 24; $script:Cfg.X265Crf = 20; $script:Cfg.VmafThreshold = 96; $script:Cfg.PhotoQuality = 90; $script:Cfg.PhotoSsim = 0.990 }
-                    '3' { $script:Cfg.QsvQuality = 27; $script:Cfg.X265Crf = 22; $script:Cfg.VmafThreshold = 95; $script:Cfg.PhotoQuality = 85; $script:Cfg.PhotoSsim = 0.985 }
+                    '1' { $script:Cfg.NvencCq = 21; $script:Cfg.QsvQuality = 21; $script:Cfg.X265Crf = 18; $script:Cfg.VmafThreshold = 97; $script:Cfg.PhotoQuality = 93; $script:Cfg.PhotoSsim = 0.993 }
+                    '2' { $script:Cfg.NvencCq = 24; $script:Cfg.QsvQuality = 24; $script:Cfg.X265Crf = 20; $script:Cfg.VmafThreshold = 96; $script:Cfg.PhotoQuality = 90; $script:Cfg.PhotoSsim = 0.990 }
+                    '3' { $script:Cfg.NvencCq = 27; $script:Cfg.QsvQuality = 27; $script:Cfg.X265Crf = 22; $script:Cfg.VmafThreshold = 95; $script:Cfg.PhotoQuality = 85; $script:Cfg.PhotoSsim = 0.985 }
                 }
             }
             '0' { Save-Config; return }
@@ -1294,51 +1735,107 @@ function Show-SettingsMenu {
 function Show-MainMenu {
     while ($true) {
         Clear-Host
-        Write-Host '==============================================================' -ForegroundColor Cyan
-        Write-Host '   SQUEEZE  -  video HEVC, foto JPEG, audio Opus' -ForegroundColor Cyan
-        Write-Host '==============================================================' -ForegroundColor Cyan
+        Write-BoxTop
+        Write-BoxLine -Text "S Q U E E Z E   •   Media Compressor" -Align Center -Color Cyan
+        Write-BoxLine -Text "Video HEVC (NVENC/QSV/x265) • Foto • Audio" -Align Center -Color DarkCyan
+        Write-BoxSep
+
+        # Status badge 1: Cartella
+        $dirTxt = if ($script:Cfg.SourceDir) { $script:Cfg.SourceDir } else { '(non selezionata: usa [1])' }
+        $dirBadge = if ($script:Cfg.SourceDir) { 'DIR' } else { 'NON IMPOSTATA' }
+        $dirCol = if ($script:Cfg.SourceDir) { 'Green' } else { 'Yellow' }
+        Write-BoxBadgedLine -Label 'Cartella' -Badge $dirBadge -BadgeColor $dirCol -Detail $dirTxt -DetailColor $(if ($script:Cfg.SourceDir) { 'White' } else { 'DarkYellow' })
+
+        # Status badge 2: Encoder
         $enc = Resolve-Encoder
-        $encTxt = switch ($enc) {
-            'qsv'  { "Intel QSV (GPU), qualita' $($script:Cfg.QsvQuality)" }
-            'x265' { "x265 (CPU), CRF $($script:Cfg.X265Crf), preset $($script:Cfg.X265Preset)" }
-            default { 'NESSUNO DISPONIBILE (controlla [6])' }
+        $encBadge = switch ($enc) {
+            'nvenc' { 'GPU NVENC' }
+            'qsv'   { 'GPU QSV' }
+            'x265'  { 'CPU x265' }
+            default { 'NESSUNO' }
         }
-        Write-Host (" Cartella : {0}" -f $(if ($script:Cfg.SourceDir) { $script:Cfg.SourceDir } else { '(non selezionata)' }))
-        Write-Host (" Encoder  : {0}" -f $encTxt)
-        Write-Host (" VMAF     : {0}   soglia {1}   retry auto {2}" -f $(if ($script:HasVmaf) { 'disponibile' } else { 'NON disponibile' }), $script:Cfg.VmafThreshold, (Format-OnOff $script:Cfg.AutoRetry))
-        $imTxt = if ($script:MagickExe) {
-            "ImageMagick OK, Q$($script:Cfg.PhotoQuality), soglia SSIM $(([double]$script:Cfg.PhotoSsim).ToString('0.000', $script:Inv))" +
-            $(if (-not $script:MagickSsim) { ' (SSIM non disponibile!)' } else { '' }) + $(if ($script:ExifTool) { ', exiftool' } else { '' })
-        } else { 'ImageMagick NON trovato (funzioni foto disattivate)' }
-        Write-Host (" Foto     : {0}" -f $imTxt)
-        $audioTxt = if (-not $script:HasFfmpeg) { 'ffmpeg non trovato' }
-                    elseif (-not $script:HasOpus) { 'libopus NON disponibile' }
-                    else { "WAV/FLAC -> Opus $($script:Cfg.OpusBitrate)k, cover " + (Format-OnOff $script:Cfg.OpusCover) }
-        Write-Host (" Audio    : {0}" -f $audioTxt)
-        Write-Host '--------------------------------------------------------------'
-        Write-Host ' [1] Scegli cartella (video, foto e audio)'
-        Write-Host ' [2] Analizza cartella (elenco video e foto)'
-        Write-Host ' [3] Comprimi VIDEO'
-        Write-Host ' [4] Comprimi VIDEO + verifica + ricodifica automatica   (consigliato)'
-        Write-Host ' [5] Solo verifica VIDEO (output gia'' presenti)'
-        Write-Host ' [6] Impostazioni'
-        Write-Host ' [7] Comprimi FOTO JPEG (+ verifica SSIM e metadati + retry)'
-        Write-Host ' [8] Solo verifica FOTO (output gia'' presenti)'
-        Write-Host ' [9] Test qualita'' su una foto (confronto di piu'' valori)'
-        Write-Host ' [10] Comprimi AUDIO (WAV/FLAC -> Opus)'
-        Write-Host ' [0] Esci'
-        switch ((Read-Host 'Scelta').Trim()) {
-            '1' { Select-Folder }
-            '2' { Show-Scan }
-            '3' { Start-Batch 'compress' }
-            '4' { Start-Batch 'full' }
-            '5' { Start-Batch 'verify' }
-            '6' { Show-SettingsMenu }
-            '7' { Start-Batch 'full' 'photo' }
-            '8' { Start-Batch 'verify' 'photo' }
-            '9' { Show-PhotoTest }
+        $encBadgeCol = switch ($enc) {
+            'nvenc' { 'Green' }
+            'qsv'   { 'Green' }
+            'x265'  { 'Yellow' }
+            default { 'Red' }
+        }
+        $encDetail = switch ($enc) {
+            'nvenc' { "NVIDIA NVENC (CQ $($script:Cfg.NvencCq), preset $($script:Cfg.NvencPreset))" }
+            'qsv'   { "Intel QSV (qualita' $($script:Cfg.QsvQuality))" }
+            'x265'  { "x265 (CRF $($script:Cfg.X265Crf), preset $($script:Cfg.X265Preset))" }
+            default { "Nessun encoder utilizzabile (controlla [6])" }
+        }
+        Write-BoxBadgedLine -Label 'Encoder' -Badge $encBadge -BadgeColor $encBadgeCol -Detail $encDetail -DetailColor 'White'
+
+        # Status badge 3: VMAF
+        $vmafBadge = if ($script:HasVmaf) { 'OK' } else { 'NO' }
+        $vmafBadgeCol = if ($script:HasVmaf) { 'Green' } else { 'Red' }
+        $vmafDetail = if ($script:HasVmaf) {
+            "Soglia $($script:Cfg.VmafThreshold) • Retry auto $(Format-OnOff $script:Cfg.AutoRetry) (1 frame ogni $($script:Cfg.VmafSubsample))"
+        } else {
+            "libvmaf NON presente in ffmpeg (verifica video disattivata)"
+        }
+        Write-BoxBadgedLine -Label 'VMAF' -Badge $vmafBadge -BadgeColor $vmafBadgeCol -Detail $vmafDetail
+
+        # Status badge 4: Foto
+        $photoBadge = if (-not $script:MagickExe) { 'NO' } elseif (-not $script:MagickSsim) { 'SENZA SSIM' } else { 'OK' }
+        $photoBadgeCol = if (-not $script:MagickExe) { 'DarkGray' } elseif (-not $script:MagickSsim) { 'Yellow' } else { 'Green' }
+        $photoDetail = if ($script:MagickExe) {
+            $ssimStr = if ($script:MagickSsim) { ([double]$script:Cfg.PhotoSsim).ToString('0.000', $script:Inv) } else { 'non disp!' }
+            $etStr = if ($script:ExifTool) { ', exiftool' } else { '' }
+            "ImageMagick (Q$($script:Cfg.PhotoQuality), SSIM $ssimStr$etStr)"
+        } else {
+            "ImageMagick non trovato (funzioni foto disattivate)"
+        }
+        Write-BoxBadgedLine -Label 'Foto' -Badge $photoBadge -BadgeColor $photoBadgeCol -Detail $photoDetail
+
+        # Status badge 5: Audio
+        $audioOk = ($script:HasFfmpeg -and $script:HasOpus)
+        $audioBadge = if ($audioOk) { 'OK' } else { 'NO' }
+        $audioBadgeCol = if ($audioOk) { 'Green' } else { 'DarkGray' }
+        $audioDetail = if (-not $script:HasFfmpeg) { "ffmpeg non trovato" }
+                       elseif (-not $script:HasOpus) { "libopus non disponibile in ffmpeg" }
+                       else { "WAV/FLAC -> Opus $($script:Cfg.OpusBitrate) kb/s • Cover $(Format-OnOff $script:Cfg.OpusCover)" }
+        Write-BoxBadgedLine -Label 'Audio' -Badge $audioBadge -BadgeColor $audioBadgeCol -Detail $audioDetail
+
+        Write-BoxSep
+        Write-BoxLine -Text "  CARTELLA E ANALISI" -Color DarkCyan
+        Write-BoxLine -Text "   [1] Scegli cartella sorgente (trascina o premi Invio per sfogliare)" -Color White
+        Write-BoxLine -Text "   [2] Analizza cartella (elenco video, foto e audio)" -Color White
+
+        Write-BoxLine -Text "  VIDEO (HEVC + VMAF)" -Color DarkCyan
+        Write-BoxLine -Text "   [3] Comprimi VIDEO (solo compressione)" -Color White
+        Write-BoxTwoCol -Left "   [4] Comprimi VIDEO + verifica VMAF + retry auto" -Right "*consigliato  " -LeftColor White -RightColor Green
+        Write-BoxLine -Text "   [5] Solo verifica VIDEO (output gia' presenti)" -Color White
+        Write-BoxLine -Text "   [11] Test qualita' su un VIDEO (confronto di piu' valori CQ/CRF)" -Color White
+
+        Write-BoxLine -Text "  FOTO (JPEG + SSIM)" -Color DarkCyan
+        Write-BoxLine -Text "   [7] Comprimi FOTO JPEG (+ verifica SSIM e metadati + retry)" -Color White
+        Write-BoxLine -Text "   [8] Solo verifica FOTO (output gia' presenti)" -Color White
+        Write-BoxLine -Text "   [9] Test qualita' su una FOTO (confronto di piu' valori Q)" -Color White
+
+        Write-BoxLine -Text "  AUDIO (WAV/FLAC -> Opus)" -Color DarkCyan
+        Write-BoxLine -Text "   [10] Comprimi AUDIO (WAV/FLAC -> Opus con tag e copertina)" -Color White
+
+        Write-BoxLine -Text "  SISTEMA" -Color DarkCyan
+        Write-BoxTwoCol -Left "   [6] Impostazioni" -Right "[0] Salva ed esci  " -LeftColor Cyan -RightColor Gray
+        Write-BoxBottom
+
+        $choice = Read-BoxPrompt "Scelta"
+        switch ($choice) {
+            '1'  { Select-Folder }
+            '2'  { Show-Scan }
+            '3'  { Start-Batch 'compress' }
+            '4'  { Start-Batch 'full' }
+            '5'  { Start-Batch 'verify' }
+            '11' { Show-VideoTest }
+            '6'  { Show-SettingsMenu }
+            '7'  { Start-Batch 'full' 'photo' }
+            '8'  { Start-Batch 'verify' 'photo' }
+            '9'  { Show-PhotoTest }
             '10' { Start-Batch 'compress' 'audio' }
-            '0' { Save-Config; return }
+            '0'  { Save-Config; return }
         }
     }
 }
@@ -1347,6 +1844,6 @@ function Show-MainMenu {
 #  AVVIO
 # ----------------------------------------------------------------------------
 Import-Config
-Write-Host 'Controllo ffmpeg / QSV / VMAF ...' -ForegroundColor DarkGray
+Write-Host 'Controllo ffmpeg / NVENC / QSV / VMAF / ImageMagick ...' -ForegroundColor DarkGray
 if (-not (Test-Tools)) { Wait-Enter; exit 1 }
 Show-MainMenu
