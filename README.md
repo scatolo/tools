@@ -1,5 +1,7 @@
 # Squeeze: documentazione
 
+[ 🇮🇹 Italiano ](README.md) · [ 🇬🇧 English ](README_EN.md) · [ 📘 Documentazione Tecnica ](TECHNICAL.md)
+
 Strumento da terminale (PowerShell su Windows, Python su Linux) per **ridurre le dimensioni di video, foto e audio** di fotocamere come DJI Osmo Action e Sony Alpha, **senza differenze visibili rispetto all'originale** e conservando i metadati che le librerie permettono di conservare.
 
 Documento riferito a `squeeze.ps1` e `squeeze.py` (video DJI/Sony, foto JPEG e conversione audio WAV/FLAC in Opus), aggiornato al 11 ottobre 2026.
@@ -14,12 +16,13 @@ Documento riferito a `squeeze.ps1` e `squeeze.py` (video DJI/Sony, foto JPEG e c
 6. [Come scegliere la qualità](#6-come-scegliere-la-qualità)
 7. [Cosa viene conservato e cosa si perde](#7-cosa-viene-conservato-e-cosa-si-perde)
 8. [Output, log e stati](#8-output-log-e-stati)
-9. [Documentazione tecnica](#9-documentazione-tecnica)
+9. [Documentazione tecnica](#9-documentazione-tecnica) ([approfondimento completo in TECHNICAL.md](TECHNICAL.md))
 10. [Risoluzione dei problemi](#10-risoluzione-dei-problemi)
 11. [Limiti noti e stato dei test](#11-limiti-noti-e-stato-dei-test)
 12. [FAQ](#12-faq)
 13. [Personalizzare lo script](#13-personalizzare-lo-script)
 14. [Glossario](#14-glossario)
+15. [Licenza](#15-licenza)
 
 ---
 
@@ -114,7 +117,7 @@ Workflow consigliato, la prima volta che usi lo strumento su una nuova fotocamer
 2. **`[1]` Scegli cartella.** Premi Invio per aprire il selettore grafico cartelle nativo di sistema (oppure trascina la cartella o incollane il percorso).
 3. **`[2]` Analizza.** Controlla codec, risoluzione, bitrate (video) e qualità stimata (foto). Serve a capire cosa stai per comprimere.
 4. **Prova su pochi file.** Per i video puoi usare **`[11]`** (test comparativo su uno spezzone/clip con diversi valori CQ/CRF) oppure comprimere 2-3 clip con `[4]`. Per le foto usa `[9]` (test su una foto).
-5. **Guarda i file di output a occhio.** In particolare i clip scuri, i cieli e le scene con molto movimento. Le metriche non vedono tutto (vedi [6.3](#63-limiti-delle-metriche)).
+5. **Guarda i file di output a occhio.** In particolare i clip scuri, i cieli e le scene con molto movimento. Le metriche non vedono tutto (vedi [6.4](#64-limiti-delle-metriche)).
 6. **Imposta i valori scelti** in `[6]` (o parti dal preset *Archivio*).
 7. **Lancia sul lotto vero** con `[4]` (video) e/o `[7]` (foto).
 8. **Controlla il riepilogo.** I file elencati in *DA CONTROLLARE* vanno esaminati: tieni l'originale per quelli.
@@ -166,7 +169,7 @@ Workflow consigliato, la prima volta che usi lo strumento su una nuova fotocamer
 | **7** | Comprime le foto JPEG, poi SSIM + metadati + retry. | Salta le foto già compresse almeno quanto il target. |
 | **8** | Verifica SSIM e metadati di output foto già esistenti. | |
 | **9** | Comprime **una** foto a più qualità e mostra dimensione, SSIM e metadati. | Usa una cartella temporanea che viene poi cancellata. Non scrive in `out`. |
-| **10** | Converte i file **WAV/FLAC** in **Opus** nella cartella `opus`, copiando i tag e la copertina. | Vedi [7.3](#73-audio-wavflac--opus). |
+| **10** | Converte i file **WAV/FLAC** in **Opus** nella cartella `opus`, copiando i tag e la copertina. | Vedi [7.3](#73-audio-wavflac-opus). |
 | **0** | Salva la configurazione ed esce. | |
 
 Prima di ogni lotto lo script mostra un riepilogo (numero file, encoder, qualità, cartella di output) e chiede **conferma** (`s`/`n`).
@@ -420,6 +423,8 @@ La conversione audio `[10]` non ha verifica di qualità: gli stati sono `OK`, `E
 
 ## 9. Documentazione tecnica
 
+> 📘 Per una trattazione approfondita sull'architettura interna, la matematica del CRC-32 Ogg, la scala di fallback degli encoder e la preservazione del campionamento croma, consulta la **[Guida Tecnica Approfondita (TECHNICAL.md)](TECHNICAL.md)** (o in inglese: **[TECHNICAL_EN.md](TECHNICAL_EN.md)**).
+
 ### 9.1 Struttura del codice
 
 Un solo file `.ps1` (o `.py` su Linux), organizzato in sezioni:
@@ -600,7 +605,7 @@ ffmpeg -hide_banner -loglevel error -y -i INPUT.FLAC -map 0:v:0 -c copy cover.jp
 | `ERRORE: né ffmpeg né ImageMagick trovati` | PATH non aggiornato | Chiudi e riapri il terminale; verifica con `ffmpeg -version` e `magick -version` |
 | Lo script non parte / "esecuzione di script disabilitata" | Execution Policy | Avvia con `powershell -ExecutionPolicy Bypass -File ...` e usa `Unblock-File` |
 | Gli accenti compaiono rovinati | Script salvato senza BOM | Salvalo come UTF-8 con BOM |
-| Encoder: *x265 (CPU)* invece di QSV | QSV non disponibile | Aggiorna i driver Intel Graphics; verifica `hevc_qsv` con il Passo 2 di [2.2](#22-installazione-passo-per-passo) |
+| Encoder: *x265 (CPU)* invece di QSV | QSV non disponibile | Aggiorna i driver Intel Graphics; verifica `hevc_qsv` con il Passo 2 di [2.2](#22-installazione-windows) |
 | Video molto lenti (circa 2-3 fps) | Si sta usando x265 su CPU | Come sopra, oppure alza il preset a `fast`/`veryfast` |
 | `VMAF: NON disponibile` | Build ffmpeg senza `libvmaf` | Installa una build *full* (gyan.dev o `Gyan.FFmpeg`) |
 | `VMAF non letto` | Misura fallita (formati diversi, file corrotto) | Prova `ffmpeg -i out.mp4 -i orig.mp4 -lavfi libvmaf -f null -` a mano e guarda l'errore |
@@ -632,7 +637,7 @@ ffmpeg -hide_banner -loglevel error -y -i INPUT.FLAC -map 0:v:0 -c copy cover.jp
 - **Output video sempre HEVC.** È ben supportato (WhatsApp e Instagram su telefoni recenti, Apple, Android), ma non posso garantire ogni app e versione. Non c'è una modalità H.264.
 - **La compressione JPEG→JPEG è sempre con perdita.** Qui è controllata, ma non è lossless.
 - **Un processo alla volta.** Non c'è parallelismo tra file (la GPU lavora, poi la CPU calcola VMAF/SSIM).
-- **Le metriche non sono onniscienti** (vedi [6.3](#63-limiti-delle-metriche)).
+- **Le metriche non sono onniscienti** (vedi [6.4](#64-limiti-delle-metriche)).
 - **Audio: la conversione è con perdita.** Da WAV/FLAC a Opus il contenuto cambia (a 128+ kb/s è di norma trasparente, ma non è lossless).
 - **Audio: solo WAV e FLAC in ingresso.** Non vengono toccati MP3, M4A, OGG, Opus, ecc.
 - **WAV: metadati limitati.** Si leggono solo i chunk `RIFF/INFO` (con fallback `ffprobe`); eventuali tag ID3v2 dentro il WAV non sono gestiti e il WAV non ha un concetto di artisti multipli.
@@ -741,3 +746,9 @@ if ($e) { $e | ForEach-Object { $_.Message } } else { "PARSE OK" }
 | **Copertina** | Immagine dell'album; qui salvata come file (`cover.jpg`/...) nella cartella `opus`, non incorporata |
 | **Sidecar** | File accessorio affiancato al media (XML, SRT, XMP) |
 | **`.part`** | File temporaneo in scrittura, rinominato a fine lavoro |
+
+---
+
+## 15. Licenza
+
+Questo software è distribuito con licenza open source **MIT**. Consulta il file [LICENSE](LICENSE) per il testo completo e le condizioni legali.
