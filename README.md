@@ -4,7 +4,7 @@
 
 Strumento da terminale (PowerShell su Windows, Python su Linux) per **ridurre le dimensioni di video, foto e audio** di fotocamere come DJI Osmo Action e Sony Alpha, **senza differenze visibili rispetto all'originale** e conservando i metadati che le librerie permettono di conservare.
 
-Documento riferito a `squeeze.ps1` e `squeeze.py` (video DJI/Sony, foto JPEG e conversione audio WAV/FLAC in Opus), aggiornato al 11 ottobre 2026.
+Documento riferito a `squeeze.ps1` e `squeeze.py` (video DJI/Sony, foto JPEG e conversione/aggregazione audio con focus su Opus + M4A/AAC/MP3), aggiornato a novembre 2026.
 
 ## Indice
 
@@ -34,11 +34,11 @@ Documento riferito a `squeeze.ps1` e `squeeze.py` (video DJI/Sony, foto JPEG e c
 |---|---|---|
 | **Video** (`.mp4`, `.mov`) | Ricodificati in HEVC (H.265) con la GPU NVIDIA (NVENC), GPU Intel (Quick Sync) o con la CPU (x265). Risoluzione e fps restano uguali. | **VMAF** (0-100) confrontando output e originale |
 | **Foto** (`.jpg`, `.jpeg`) | Ricodificate come JPEG a qualità inferiore, stessa risoluzione e stesso sottocampionamento del colore. | **SSIM** (0-1) + confronto dei metadati |
-| **Audio** (`.wav`, `.flac`) | Convertiti in **Opus** (>=128 kb/s, VBR), con tutti i tag copiati. Gli artisti multipli restano tag separati. | Nessuna misura: Opus a bitrate scelto è trasparente |
+| **Audio** (`.flac`, `.wav`, `.mp3`, `.aiff`, `.m4a`, `.aac`, `.ogg`, `.wma`, `.ape`, `.alac`, `.opus`) | Convertiti con focus principale su **Opus** (VBR, riscrittura nativa pagina Ogg `OpusTags` con artisti multipli separati) oppure **M4A** (AAC), **AAC** (`.aac`) o **MP3** (`libmp3lame`). Supporta sia struttura **mirror** sia aggregazione automatica **Artista/Album** (*musNav*: compilation in `Various Artists/`, multi-disco in `Disc N/`, copertina `cover.jpeg`). | Nessuna misura: Opus/AAC/MP3 al bitrate scelto |
 
 ### Principi di funzionamento
 
-- **Gli originali non vengono mai modificati né cancellati.** Video e foto vanno in una cartella `out`, l'audio in una cartella `opus` (entrambe accanto alla sorgente).
+- **Gli originali sono protetti di default (eliminazione opzionale).** Video e foto vanno nella cartella `out`, l'audio in `opus` (o `m4a`/`aac`/`mp3` in base al formato scelto). Se attivi l'opzione *Elimina originali* (`[O]` in Impostazioni o dalle opzioni rapide audio), il file sorgente viene eliminato **solo** dopo che il corrispondente file convertito è stato creato e verificato con successo.
 - **La qualità viene misurata, non presunta.** Se un file scende sotto la soglia, viene ricodificato in automatico a qualità più alta.
 - **Niente file a metà.** Ogni file viene scritto con estensione `.part` e rinominato solo a lavoro finito.
 - **È riprendibile.** Se interrompi e rilanci, i file già pronti in `out` non vengono rifatti.
@@ -62,7 +62,7 @@ Il risparmio dipende molto dal contenuto: scene scure, rumorose o molto dettagli
 |---|---|---|
 | **Windows 10/11** | script `.ps1` | Usa `squeeze.ps1` con PowerShell 5.1+ |
 | **Linux (Fedora 44)** | script `.py` | Usa `squeeze.py` con Python 3.9+ |
-| **ffmpeg + ffprobe** (build *full*) | video e audio | Servono i componenti `libx265`, `libvmaf`, `libopus` e (per la GPU) `hevc_nvenc` e/o `hevc_qsv` |
+| **ffmpeg + ffprobe** (build *full*) | video e audio | Servono i componenti `libx265`, `libvmaf`, `libopus` (più `aac`/`libmp3lame` per M4A/AAC/MP3) e (per la GPU) `hevc_nvenc` e/o `hevc_qsv` |
 | **GPU NVIDIA (GeForce RTX 3000/4000)** + driver | video su GPU NVIDIA | Opzionale. Encoder NVENC (`hevc_nvenc`) con preset ad altissima qualità (`p7`, multipass fullres, spatial/temporal AQ) |
 | **GPU Intel con Quick Sync** + driver | video su GPU Intel | Opzionale (ma consigliata). Su Windows usa D3D11, su Linux `/dev/dri/renderD128` |
 | **ImageMagick 7** (comando `magick`) | foto | Deve avere la metrica `SSIM` |
@@ -136,11 +136,11 @@ Workflow consigliato, la prima volta che usi lo strumento su una nuova fotocamer
 │ Encoder    : [GPU NVENC]      NVIDIA NVENC (CQ 24, preset p7)                │
 │ VMAF       : [OK]             Soglia 96 • Retry auto SI (1 frame ogni 5)     │
 │ Foto       : [OK]             ImageMagick (Q90, SSIM 0.990, exiftool)        │
-│ Audio      : [OK]             WAV/FLAC -> Opus 160 kb/s • Cover SI           │
+│ Audio      : [OPUS]           Opus 160 kb/s • mirror • Cover SI              │
 ├──────────────────────────────────────────────────────────────────────────────┤
 │   CARTELLA E ANALISI                                                         │
 │    [1] Scegli cartella sorgente (trascina o premi Invio per sfogliare)       │
-│    [2] Analizza cartella (elenco video, foto e audio)                        │
+│    [2] Analizza cartella (elenco video, foto e libreria audio)               │
 │   VIDEO (HEVC + VMAF)                                                        │
 │    [3] Comprimi VIDEO (solo compressione)                                    │
 │    [4] Comprimi VIDEO + verifica VMAF + retry auto              *consigliato │
@@ -150,8 +150,8 @@ Workflow consigliato, la prima volta che usi lo strumento su una nuova fotocamer
 │    [7] Comprimi FOTO JPEG (+ verifica SSIM e metadati + retry)               │
 │    [8] Solo verifica FOTO (output già presenti)                              │
 │    [9] Test qualità su una FOTO (confronto di più valori Q)                  │
-│   AUDIO (WAV/FLAC -> Opus)                                                   │
-│    [10] Comprimi AUDIO (WAV/FLAC -> Opus con tag e copertina)                │
+│   AUDIO (Opus focus • M4A / AAC / MP3 • aggregazione musNav)                 │
+│    [10] Converti / aggrega AUDIO (Opus/M4A/AAC/MP3, tag, cover, Artista/Alb) │
 │   SISTEMA                                                                    │
 │    [6] Impostazioni                                    [0] Salva ed esci     │
 ╰──────────────────────────────────────────────────────────────────────────────╯
@@ -160,7 +160,7 @@ Workflow consigliato, la prima volta che usi lo strumento su una nuova fotocamer
 | Voce | Cosa fa | Note |
 |---|---|---|
 | **1** | Imposta la cartella sorgente. | Viene ricordata alla prossima apertura. Accetta il trascinamento o, premendo Invio a vuoto, apre la finestra di dialogo grafica nativa (FolderBrowserDialog su Windows / Zenity, Kdialog o Tkinter su Linux). |
-| **2** | Elenca i file trovati con i loro parametri. | Non modifica nulla. Mostra anche il profilo colore (`Trc`) dei video e i file audio. |
+| **2** | Elenca i file trovati con i loro parametri. | Non modifica nulla. Mostra profilo colore (`Trc`) dei video, qualità foto e metadati della libreria audio (codec, kHz, durata, Artista, Album, copertina). |
 | **3** | Comprime i video senza verificare. | Più veloce, ma senza garanzia di qualità. |
 | **4** | Comprime, misura il VMAF e ricodifica da solo i file sotto soglia. | La modalità normale. Mostra la barra di avanzamento dinamica. Un output già presente viene verificato, non rifatto. |
 | **5** | Misura il VMAF di output già esistenti. | Utile per controllare file fatti in altro modo. |
@@ -169,10 +169,10 @@ Workflow consigliato, la prima volta che usi lo strumento su una nuova fotocamer
 | **7** | Comprime le foto JPEG, poi SSIM + metadati + retry. | Salta le foto già compresse almeno quanto il target. |
 | **8** | Verifica SSIM e metadati di output foto già esistenti. | |
 | **9** | Comprime **una** foto a più qualità e mostra dimensione, SSIM e metadati. | Usa una cartella temporanea che viene poi cancellata. Non scrive in `out`. |
-| **10** | Converte i file **WAV/FLAC** in **Opus** nella cartella `opus`, copiando i tag e la copertina. | Vedi [7.3](#73-audio-wavflac-opus). |
+| **10** | Converte e organizza i file audio in **Opus** (focus principale) o **M4A** / **AAC** / **MP3**, in modalità *mirror* o *Artista/Album* (*musNav*), con anteprima *dry-run*, tag e `cover.jpeg`. | Vedi [7.3](#73-audio-opus-m4a-aac-mp3-e-aggregazione-musnav). |
 | **0** | Salva la configurazione ed esce. | |
 
-Prima di ogni lotto lo script mostra un riepilogo (numero file, encoder, qualità, cartella di output) e chiede **conferma** (`s`/`n`).
+Prima di ogni lotto lo script mostra un riepilogo (numero file, encoder, qualità, cartella di output) e chiede **conferma** (`s`/`n`; per l'audio anche `m` per modificare al volo formato, bitrate, organizzazione, cartella ed eliminazione originali).
 
 ---
 
@@ -196,11 +196,14 @@ Prima di ogni lotto lo script mostra un riepilogo (numero file, encoder, qualit�
 | `I` | JPEG progressivo | SI | SI/NO | File un po' più piccoli; compatibile con i browser e i social |
 | `J` | Verifica foto | SI | SI/NO | SSIM + confronto metadati |
 | `C` | Audio video | `auto` | auto / copy / aac | `auto`: PCM diventa AAC, il resto resta in copia |
-| `D` | Bitrate AAC | 320 | 128-512 kb/s | Usato solo quando l'audio viene convertito |
-| `K` | Bitrate Opus | 160 | 128-512 kb/s | Bitrate medio VBR della conversione audio (`[10]`) |
-| `L` | Copertina audio | SI | SI/NO | Copia/estrae la copertina nella cartella `opus` |
-| `A` | Includi sottocartelle | NO | SI/NO | Ricorsivo; mantiene la struttura in `out` |
-| `B` | Sovrascrivi output | NO | SI/NO | Se NO, i file già in `out` non vengono rifatti |
+| `D` | Bitrate AAC video | 320 | 128-512 kb/s | Usato solo quando l'audio dei video viene convertito |
+| `Q` | Formato audio (`[10]`) | `opus` | opus / m4a / aac / mp3 | Focus principale su `opus` (`libopus`); opzionali `m4a` (AAC in MP4), `aac` (ADTS) e `mp3` (`libmp3lame`) |
+| `K` | Bitrate audio (`[10]`) | 160 | 32-512 kb/s | Bitrate della conversione audio (`[10]`, VBR per Opus) |
+| `R` | Organizzazione audio | `mirror` | mirror / artist_album | `mirror` replica le sottocartelle; `artist_album` aggrega in `Artista/Album/NN - Titolo.ext` (*musNav*) |
+| `L` | Copertina audio | SI | SI/NO | Estrae/copia `cover.jpeg` in ogni cartella album di destinazione |
+| `A` | Includi sottocartelle | NO | SI/NO | Ricorsivo; mantiene la struttura in `out` (o scansiona l'intera libreria audio) |
+| `B` | Sovrascrivi output | NO | SI/NO | Se NO, i file già presenti nell'output non vengono rifatti |
+| `O` | Elimina originali | NO | SI/NO | Se SI, elimina il file sorgente **solo** dopo conversione riuscita (`OK`) |
 | `M` | Conserva date file | SI | SI/NO | Copia data di creazione e modifica sull'output |
 | `N` | Cartella output | `<sorgente>\out` | percorso | Vuoto = default |
 | `E` | xvYCC → bt709 (Sony) | SI | SI/NO | Cambia solo l'etichetta del colore, non i pixel |
@@ -237,6 +240,7 @@ Viene creato accanto allo script e riscritto a ogni modifica. Puoi editarlo a ma
   "AutoRetry": true,
   "MaxRetries": 2,
   "Overwrite": false,
+  "DeleteOriginals": false,
   "PreserveDates": true,
   "AudioMode": "auto",
   "AacBitrate": 320,
@@ -249,17 +253,22 @@ Viene creato accanto allo script e riscritto a ogni modifica. Puoi editarlo a ma
   "PhotoVerify": true,
   "PhotoExtensions": [".jpg", ".jpeg"],
   "Extensions": [".mp4", ".mov"],
+  "AudioFormat": "opus",
+  "AudioLayout": "mirror",
+  "AudioOutDir": "",
+  "AudioFallbackArtist": "Unknown",
+  "AudioFallbackAlbum": "Unknown",
   "OpusBitrate": 160,
   "OpusCover": true,
-  "OpusExtensions": [".wav", ".flac"],
-  "OpusCoverNames": ["cover", "folder", "front", "album"],
+  "OpusExtensions": [".wav", ".flac", ".mp3", ".aiff", ".aif", ".m4a", ".aac", ".ogg", ".oga", ".wma", ".ape", ".alac", ".opus"],
+  "OpusCoverNames": ["cover", "folder", "front", "album", "albumart", "albumcover"],
   "OpusCoverExts": [".jpg", ".jpeg", ".png"]
 }
 ```
 
 `Extensions`, `PhotoExtensions`, `SidecarExts`, `OpusExtensions`, `OpusCoverNames` e `OpusCoverExts` si cambiano solo da qui. Per tornare ai default, elimina il file.
 
-> **Migrazione dal vecchio nome.** Se accanto allo script esiste ancora `dji-compress.config.json` e non esiste `squeeze.config.json`, le impostazioni vengono lette dal vecchio file e riscritte automaticamente come `squeeze.config.json`.
+> **Migrazione automatica.** Se accanto allo script esiste ancora `dji-compress.config.json` (o un `squeeze.config.json` con le sole 2 estensioni `.wav`/`.flac`), le impostazioni vengono migrate automaticamente includendo tutte le 13 estensioni audio supportate.
 
 ---
 
@@ -353,30 +362,42 @@ Se ti servono i dati giroscopio (per Gyroflow) o i metadati Sony per un clip, **
 | **Anteprima MPF** (immagine 1920x1080 incorporata dalle Sony) | **Persa** |
 | MakerNote Sony | Non verificato su file reali Sony: guarda la colonna *Metadati* nel test `[9]` |
 
-### 7.3 Audio (WAV/FLAC → Opus)
+### 7.3 Audio (Opus, M4A, AAC, MP3 e aggregazione musNav)
 
-La voce `[10]` converte i file **WAV** e **FLAC** in **Opus** (contenitore Ogg, codec `libopus`), scrivendo nella cartella `<sorgente>\opus` (con sottocartelle replicate se *Includi sottocartelle* è attivo). L'audio è sempre ricodificato; il bitrate medio è quello scelto in `[6]` → `K` (default 160 kb/s, minimo 128), in modalità VBR.
+La voce `[10]` integra nativamente le funzionalità di **musNav** insieme al riscrittore binario di commenti Ogg di Squeeze:
 
-**Metadati.** I tag vengono letti direttamente dal file sorgente e riscritti pari-pari nell'Opus:
+- **Formati sorgente supportati (13 estensioni):** `.flac`, `.wav`, `.mp3`, `.aiff`, `.aif`, `.m4a`, `.aac`, `.ogg`, `.oga`, `.wma`, `.ape`, `.alac`, `.opus` (i sorgenti `.opus` vengono saltati automaticamente quando il formato target è `opus`).
+- **Formato di output (`[Q]` in Impostazioni o `m` prima del lotto):**
+  - **Opus (`.opus`, focus principale, default):** contenitore Ogg, codec `libopus` VBR (`-vbr on -application audio`), cartella predefinita `<sorgente>\opus`.
+  - **M4A (`.m4a`):** contenitore MP4/M4A (`-f ipod -movflags +faststart`), codec `aac`, cartella predefinita `<sorgente>\m4a`.
+  - **AAC (`.aac`):** flusso ADTS (`-f adts -write_id3v2 1`), codec `aac`, cartella predefinita `<sorgente>\aac`.
+  - **MP3 (`.mp3`):** codec `libmp3lame` (`-id3v2_version 3`), cartella predefinita `<sorgente>\mp3`.
+- **Organizzazione delle cartelle (`[R]` in Impostazioni o `m` prima del lotto):**
+  - **`mirror` (Specchia cartelle, default):** replica fedelmente l'albero delle sottocartelle sorgenti dentro la cartella di output (`<sorgente>\<out>\<percorso_relativo>.ext`).
+  - **`artist_album` (Aggrega per Artista/Album, stile *musNav*):** organizza automaticamente i brani in `<sorgente>\<out>\<Artista>\<Album>\<NN - Titolo>.ext`:
+    - **Compilation (`Various Artists`):** se il tag `compilation` è attivo (`1`/`true`/`yes`) o `ALBUMARTIST` vale `Various Artists` / `VA` / `Artisti Vari`, l'album viene raggruppato sotto `Various Artists\<Album>\`.
+    - **Multi-disco (`Disc N`):** se un album contiene più dischi (o `DISCNUMBER > 1`), le tracce vengono suddivise automaticamente in sottocartelle `Disc 1`, `Disc 2`, ecc.
+    - **Fallback interattivo:** se alcune tracce sono prive di tag Artista o Album, prima di partire viene chiesto il nome della cartella di fallback (default `Unknown`).
+    - **Collisioni:** eventuali omonimie di percorso vengono risolte aggiungendo `(2)`, `(3)`, ecc.
+- **Riepilogo libreria e anteprima *dry-run*:** prima di avviare la conversione `[10]`, Squeeze mostra il riepilogo della libreria (numero tracce, durata totale, codec/bit depth, frequenze di campionamento, conteggio artisti/album/compilation, copertine) e l'anteprima *dry-run* `sorgente -> destinazione` dei primi 12 file. Premendo `m` al prompt di conferma puoi cambiare al volo formato, bitrate, modalità `mirror`/`artist_album`, cartella di output ed eliminazione degli originali.
+
+**Metadati.**
 
 | Elemento | Esito |
 |---|---|
 | Tag FLAC (commenti Vorbis: `TITLE`, `ALBUM`, `DATE`, `GENRE`, `TRACKNUMBER`, ecc.) | Copiati identici (nome e valore) |
-| Tag WAV (chunk RIFF `LIST/INFO`: `IART`, `INAM`, `IPRD`, ...) | Copiati con il nome Vorbis standard (`ARTIST`, `TITLE`, `ALBUM`, ...) |
-| **Artisti multipli** (più commenti `ARTIST`) | Conservati come **tag `ARTIST` separati** |
-| **`ARTIST` unico con `;`** (es. `A; B`) | Diviso in più tag `ARTIST` separati |
-| Copertina incorporata (`METADATA_BLOCK_PICTURE`/`COVERART`) | **Non** incorporata nell'Opus: salvata come file (vedi sotto) |
-| Ordine e duplicati degli altri tag | Preservati |
+| Tag WAV (chunk RIFF `LIST/INFO`: `IART`, `INAM`, `IPRD`, ...) + altri formati (`ffprobe`) | Copiati con i nomi standard (`ARTIST`, `TITLE`, `ALBUM`, ...) |
+| **Artisti multipli in Opus** (più commenti `ARTIST` o `ARTIST` con `;`) | Conservati come **tag `ARTIST` separati** nella pagina `OpusTags` |
+| Tag in M4A / AAC / MP3 | Trasferiti tramite `-map_metadata 0 -map_metadata:s:a 0:s:a` (MP4 / ID3v2.3) |
+| Copertina incorporata (`METADATA_BLOCK_PICTURE`/`COVERART`/`attached_pic`) | Esclusa dal flusso audio (`-vn`) e salvata come file `cover.jpeg` nella cartella album |
 
-> **Perché non basta ffmpeg da solo:** ffmpeg unisce più tag `ARTIST` in un unico campo `A;B` e non sa scrivere tag duplicati. Per questo lo script riscrive a mano l'header dei commenti Ogg dell'Opus (ricalcolando i CRC delle pagine), così gli artisti restano separati.
+> **Perché non basta ffmpeg da solo per Opus:** ffmpeg unisce più tag `ARTIST` in un unico campo e non sa scrivere tag duplicati. Per questo, quando il formato è Opus, lo script riscrive a mano l'header dei commenti Ogg (`OpusTags`, ricalcolando i CRC-32 delle pagine), così gli artisti multipli restano separati.
 
-**Copertina.** Opus non incorpora in modo affidabile le copertine, quindi (con `L` attivo) lo script, per ogni cartella elaborata:
+**Copertina (`cover.jpeg`).** Con `L` attivo, per ogni cartella di destinazione elaborata:
 
-1. cerca un file immagine nella cartella sorgente con nome `cover`, `folder`, `front` o `album` e estensione `.jpg`/`.jpeg`/`.png`, e lo copia nella cartella di destinazione `opus` mantenendo il nome;
-2. se non lo trova, **estrae** la copertina incorporata da uno dei file FLAC della cartella e la salva come `cover.jpg` (o `.png`);
-3. se non trova nulla, non crea nessun file.
-
-Se nella cartella `opus` esiste già una copertina, non viene sovrascritta.
+1. se il file audio sorgente ha una **copertina incorporata** (JPEG/PNG/WebP), la estrae come `cover.jpeg` (copia diretta dello stream se già MJPEG, ricodifica JPEG `-q:v 2` se PNG/WebP);
+2. altrimenti cerca nella cartella sorgente un'immagine (`cover`, `folder`, `front`, `album`, `albumart`, `albumcover` con estensione `.jpg`/`.jpeg`/`.png`, o qualsiasi altra immagine nella cartella): copia direttamente i `.jpg`/`.jpeg` e converte i `.png` in `cover.jpeg`;
+3. se nella cartella di destinazione esiste già una copertina e `Sovrascrivi` è disattivato, non viene riscritta.
 
 ---
 
@@ -384,32 +405,33 @@ Se nella cartella `opus` esiste già una copertina, non viene sovrascritta.
 
 ### 8.1 Dove finiscono i file
 
-- Cartella di output: `<sorgente>\out` (cambiabile con `B`); l'**audio** va sempre in `<sorgente>\opus`.
-- Con **sottocartelle** attive, la struttura viene replicata in `out` (e in `opus`).
-- I file nella cartella di output **non** vengono rielaborati (né quelli in `opus`).
-- Nomi e estensioni restano gli stessi (per l'audio il nome resta, l'estensione diventa `.opus`).
+- Cartella di output video/foto: `<sorgente>\out` (cambiabile con `N`).
+- Cartella di output **audio**: `<sorgente>\opus` (oppure `m4a`, `aac`, `mp3` in base al formato scelto, personalizzabile dalle opzioni rapide `m` o con `AudioOutDir` in `squeeze.config.json`).
+- Con **sottocartelle** attive (`A`), la struttura viene replicata in `out` (e nella cartella audio in modalità `mirror`, oppure riorganizzata per `Artista/Album` in modalità `artist_album`).
+- I file nelle cartelle di output (`out`, `opus`, `m4a`, `aac`, `mp3`) **non** vengono rielaborati.
 
 ### 8.2 Log CSV
 
-A fine lotto viene creato in `out\`:
+A fine lotto viene creato nella cartella di output:
 
 - `log_video_AAAAMMGG_HHMMSS.csv`
 - `log_photo_AAAAMMGG_HHMMSS.csv`
 - `log_audio_AAAAMMGG_HHMMSS.csv`
 
-Colonne video: `File, InMB, OutMB, Saved, Quality, VMAF, Audio, Status`. Colonne foto: `File, InMB, OutMB, Saved, Quality, SSIM, Meta, Status`. Colonne audio: `File, InMB, OutMB, Saved, Bitrate, Tags, Cover, Status`. `Saved` è la percentuale risparmiata; `Tags` è il numero di tag scritti, `Cover` l'esito della copertina (`copiata`/`estratta`/`presente`/`-`).
+Colonne video: `File, InMB, OutMB, Saved, Quality, VMAF, Audio, Status`. Colonne foto: `File, InMB, OutMB, Saved, Quality, SSIM, Meta, Status`. Colonne audio: `File, InMB, OutMB, Saved, Formato, Bitrate, Tags, Cover, Status`. `Saved` è la percentuale risparmiata; `Tags` è il numero di tag scritti, `Cover` l'esito della copertina (`copiata`/`estratta`/`convertita`/`presente`/`-`).
 
 ### 8.3 Stati
 
 | Stato | Significato | Cosa fare |
 |---|---|---|
-| `OK` | Sopra soglia (e metadati foto a posto) | Nulla |
+| `OK` | Conversione/verifica completata con successo | Nulla |
+| `OK (orig. eliminato)` | Conversione riuscita e file sorgente rimosso (`DeleteOriginals` attivo) | Nulla |
 | `COMPRESSO (non verificato)` | Fatto senza verifica | Verifica con `[5]`/`[8]` se serve |
 | `SOTTO SOGLIA` | Anche dopo i retry, qualità sotto la soglia | Tieni l'originale o alza la qualità |
 | `CONTROLLA METADATI` | Foto: mancano tag rispetto all'originale | Tieni l'originale |
-| `SALTATO: output piu grande` | L'output pesava più dell'originale: scartato | Il file era già molto compresso |
+| `SALTATO: output piu grande` | Video/Foto: l'output pesava più dell'originale: scartato | Il file era già molto compresso |
 | `GIA COMPRESSA (Q~N)` | Foto già a qualità ≤ target | Abbassa la qualità in `G` per forzare |
-| `ESISTENTE` | Output già presente (modalità solo compressione) | Attiva `Sovrascrivi` per rifarlo |
+| `ESISTENTE` | Output già presente (con `Sovrascrivi` disattivato) | Attiva `Sovrascrivi` (`B`) per rifarlo |
 | `MANCA OUTPUT` | In verifica: nessun output corrispondente | Comprimi prima il file |
 | `VMAF non letto` / `SSIM non letto` | La misura non ha restituito un numero | Vedi [sezione 10](#10-risoluzione-dei-problemi) |
 | `VERIFICA DISATTIVATA` | Foto: verifica spenta in `J` | Riattivala |
@@ -417,7 +439,7 @@ Colonne video: `File, InMB, OutMB, Saved, Quality, VMAF, Audio, Status`. Colonne
 
 Nelle modalità `[4]` e `[7]`, un output **già presente** non viene ricodificato ma viene **verificato**; il retry parte solo per i file codificati in quella esecuzione.
 
-La conversione audio `[10]` non ha verifica di qualità: gli stati sono `OK`, `ESISTENTE` (file già in `opus`, salvo `Sovrascrivi`), `SALTATO: output piu grande` (Opus più grande della sorgente, es. FLAC molto comprimibile) e `ERRORE ffmpeg`.
+La conversione audio `[10]` non ha verifica di qualità: gli stati sono `OK` (o `OK (orig. eliminato)` se `DeleteOriginals` è attivo), `ESISTENTE` e `ERRORE ffmpeg`.
 
 ---
 
@@ -432,12 +454,12 @@ Un solo file `.ps1` (o `.py` su Linux), organizzato in sezioni:
 | Sezione | Funzioni principali |
 |---|---|
 | Configurazione | `Import-Config`, `Save-Config` (JSON accanto allo script) |
-| Utilità e TUI | `Write-BoxTop`, `Write-BoxLine`, `Write-BoxBadgedLine`, `Write-CenteredProgress`, `Read-BoxPrompt`, `Read-Default`, `Read-IntRange`, `Get-OutDir` |
-| Controllo strumenti | `Test-Tools`, `Resolve-Encoder` (cascata NVENC -> QSV -> x265) |
+| Utilità e TUI | `Write-BoxTop`, `Write-BoxLine`, `Write-BoxBadgedLine`, `Write-CenteredProgress`, `Read-BoxPrompt`, `Read-Default`, `Read-IntRange`, `Get-OutDir`, `Get-OpusDir`, `Get-AudioFormatSpec`, `Remove-SourceFile` |
+| Controllo strumenti | `Test-Tools`, `Resolve-Encoder`, `Test-AudioEncoderAvailable` |
 | Analisi | `Get-VideoInfo`, `Get-ColorArgs`, `Test-AudioToAac`, `Get-MediaFiles`, `Copy-Sidecars` |
 | Video | `Invoke-Encode`, `Measure-Vmaf`, `Invoke-VideoJob` |
 | Foto | `Get-PhotoInfo`, `Invoke-PhotoEncode`, `Measure-Ssim`, `Test-PhotoMetadata`, `Invoke-PhotoJob` |
-| Audio | `Get-FlacComments`, `Get-RiffInfoComments`, `Get-OpusComments`, `Set-OpusTags`, `Set-AudioCover`, `Invoke-AudioJob` |
+| Audio | `Get-AudioInfo`, `Plan-AudioOutputs`, `Get-ArtistAlbumPath`, `Get-FlacComments`, `Get-RiffInfoComments`, `Get-OpusComments`, `Set-OpusTags`, `Write-FolderCover`, `Set-AudioCover`, `Invoke-AudioJob` |
 | Lotti e Menu | `Start-Batch`, `Show-Scan`, `Show-VideoTest`, `Show-PhotoTest`, `Select-Folder`, `Show-SettingsMenu`, `Show-MainMenu` |
 
 ### 9.2 Rilevamento degli strumenti (`Test-Tools`)
@@ -445,7 +467,7 @@ Un solo file `.ps1` (o `.py` su Linux), organizzato in sezioni:
 1. Cerca `ffmpeg` e `ffprobe` nel PATH.
 2. Cerca `magick` nel PATH; se manca prova `C:\Program Files\ImageMagick*\magick.exe`.
 3. Se non trova **nessuno** dei due gruppi, esce con errore.
-4. Legge gli encoder (`hevc_nvenc`, `hevc_qsv`, `libx265`) e i filtri (`libvmaf`, `libopus`) di ffmpeg.
+4. Legge gli encoder (`hevc_nvenc`, `hevc_qsv`, `libx265`, `libopus`, `libmp3lame`, `aac`) e i filtri (`libvmaf`) di ffmpeg.
 5. **Prova reale di NVENC**: codifica 0,2 secondi di un colore fisso in formato 10-bit con `hevc_nvenc -profile:v main10`. Se il comando fallisce (es. driver NVIDIA non presente o GPU non compatibile), disattiva NVENC.
 6. **Prova reale di QSV**: codifica 0,2 secondi con `hevc_qsv`. Conta il risultato reale dell'esecuzione, non solo la presenza nel PATH.
 7. Controlla se ImageMagick elenca la metrica `SSIM` e se esiste `exiftool`.
@@ -554,39 +576,40 @@ magick INPUT.JPG -quality 90 -sampling-factor 2x1 -interlace JPEG `
 
 **Nota sull'output di SSIM:** le versioni recenti di ImageMagick 7 stampano `<valore> (<distanza>)`, dove la distanza è `(1 - SSIM) / 2` (0 = identico). Lo script la converte con `SSIM = 1 - 2 × distanza`. Se la tua versione stampa un solo numero, lo usa direttamente come SSIM.
 
-### 9.6 Pipeline audio (`Invoke-AudioJob`)
+### 9.6 Pipeline audio (`Invoke-AudioJob` + `Plan-AudioOutputs`)
 
-1. **Lettura dei tag** dal file sorgente, senza passare dal dizionario di ffmpeg:
-   - **FLAC**: parsing del blocco `VORBIS_COMMENT` (vendor + elenco commenti), che conserva ordine e duplicati;
-   - **WAV**: parsing dei chunk `RIFF`, in particolare `LIST`→`INFO`, con mappatura delle chiavi 4 caratteri su quelle Vorbis (`IART`→`ARTIST`, `INAM`→`TITLE`, ...);
-   - fallback: se il parsing nativo non trova nulla, si usano i tag letti da `ffprobe`.
-2. **Normalizzazione artisti** (`Get-OpusComments`): scarta i tag copertina e divide un singolo `ARTIST` che contiene `;` in più tag `ARTIST` separati.
-3. **Codifica**:
+1. **Analisi e pianificazione (`Get-AudioInfo`, `Plan-AudioOutputs`):**
+   - `ffprobe` rileva codec, sample rate, canali, bit per sample, durata, presenza di copertine incorporate (`attached_pic` / MJPEG / PNG / WebP) e tag di formato/stream normalizzati (`Normalize-TagKey` / `Get-TagValue`).
+   - In modalità `mirror`, il percorso relativo viene replicato nella cartella di output cambiando l'estensione (`.opus`, `.m4a`, `.aac`, `.mp3`).
+   - In modalità `artist_album`, il percorso viene costruito come `<out>\<Artista>\<Album>[\Disc N]\<NN - Titolo>.<ext>`, raggruppando le compilation sotto `Various Artists` e risolvendo eventuali collisioni con suffisso `(2)`, `(3)`, ecc.
+2. **Lettura dei tag per Opus** dal file sorgente:
+   - **FLAC**: parsing nativo del blocco `VORBIS_COMMENT` (vendor + elenco commenti), che conserva ordine e duplicati;
+   - **WAV**: parsing nativo dei chunk `RIFF` (`LIST`→`INFO`), con mappatura delle chiavi 4 caratteri su quelle Vorbis (`IART`→`ARTIST`, `INAM`→`TITLE`, ...);
+   - **Altri formati / fallback**: tag di formato e stream letti da `ffprobe`.
+3. **Normalizzazione artisti** (`Get-OpusComments`): scarta i tag copertina e divide un singolo `ARTIST` che contiene `;` in più tag `ARTIST` separati.
+4. **Codifica** (in `<file>.part`):
 
 ```powershell
-ffmpeg -hide_banner -loglevel error -stats -y -i INPUT.FLAC `
-  -map 0:a:0 -vn -map_metadata -1 `
+# Opus (default):
+ffmpeg -hide_banner -loglevel error -nostdin -stats -y -i INPUT.FLAC `
+  -map 0:a:0 -vn -map_metadata 0 -map_metadata:s:a 0:s:a `
   -c:a libopus -b:a 160k -vbr on -application audio -f opus OUTPUT.OPUS.part
+
+# M4A (AAC):
+ffmpeg -hide_banner -loglevel error -nostdin -stats -y -i INPUT.FLAC `
+  -map 0:a:0 -vn -map_metadata 0 -map_metadata:s:a 0:s:a `
+  -c:a aac -b:a 160k -movflags +faststart -f ipod OUTPUT.M4A.part
 ```
 
-   - `-vn` esclude eventuali copertine incorporate; `-map_metadata -1` scrive l'Opus **senza** tag (li mettiamo noi al passo successivo).
-4. **Scrittura dei tag** (`Set-OpusTags`): si legge il pacchetto `OpusTags` generato da ffmpeg (riusandone l'id venditore), si costruisce il nuovo pacchetto Vorbis comment con i nostri tag e si **sostituisce la pagina Ogg** corrispondente, ricalcolando lacing, numeri di sequenza e **CRC-32** delle pagine (polinomio `0x04C11DB7`, come da specifica Ogg). Se il pacchetto cresce oltre una pagina, le pagine successive vengono rinumerate.
-
-   Questo è ciò che permette i tag `ARTIST` multipli, cosa che ffmpeg da solo non fa.
-5. **Copertina** (`Set-AudioCover`): copia il file affiancato (`cover`/`folder`/`front`/`album`) oppure estrae la picture incorporata con:
-
-```powershell
-ffmpeg -hide_banner -loglevel error -y -i INPUT.FLAC -map 0:v:0 -c copy cover.jpg
-```
-
-6. **Dimensioni e date**: se l'Opus risulta più grande della sorgente viene scartato; con *Conserva date* le date del file vengono copiate.
+5. **Scrittura nativa dei tag Opus** (`Set-OpusTags`): quando il target è `opus`, si legge il pacchetto `OpusTags` generato da ffmpeg (riusandone l'id venditore), si costruisce il nuovo pacchetto Vorbis comment con i nostri tag e si **sostituisce la pagina Ogg** corrispondente, ricalcolando lacing, numeri di sequenza e **CRC-32** delle pagine (polinomio `0x04C11DB7`, come da specifica Ogg). Per M4A, AAC e MP3 i tag vengono scritti direttamente dal muxer di ffmpeg (`-map_metadata 0 -map_metadata:s:a 0:s:a`).
+6. **Copertina (`Write-FolderCover` / `Set-AudioCover`)**: salva `cover.jpeg` nella cartella album di destinazione dando priorità alla copertina incorporata nel brano e poi a un file immagine nella cartella sorgente (`cover`, `folder`, `front`, `album`, `albumart`, `albumcover`), copiando i JPEG direttamente e ricodificando i PNG in JPEG.
 
 ### 9.7 Sicurezza dei dati
 
-- **Mai scritture sugli originali.** L'unica cosa che lo script cancella è un proprio output scartato o un `.part` interrotto.
+- **Originali protetti di default.** L'eliminazione dei file sorgenti (`DeleteOriginals`, opzione `[O]`) è disattivata di default; se attivata dall'utente, `Remove-SourceFile` rimuove il file sorgente **solo** quando il file di output è stato creato con successo, ha dimensione `> 0` e lo stato del job è `OK`.
 - **File parziali:** scrittura su `.part` + `finally` che lo rimuove in caso di errore o Ctrl+C. Nessun file a metà viene scambiato per completo.
-- **Output più grande dell'originale:** eliminato.
-- **Prima sovrascrittura:** solo se l'opzione `Sovrascrivi` è attiva.
+- **Output più grande dell'originale (Video/Foto):** eliminato e l'originale non viene mai cancellato.
+- **Prima sovrascrittura:** solo se l'opzione `Sovrascrivi` (`B`) è attiva.
 
 ### 9.8 Note sull'implementazione
 
@@ -618,12 +641,10 @@ ffmpeg -hide_banner -loglevel error -y -i INPUT.FLAC -map 0:v:0 -c copy cover.jp
 | `SALTATO: output piu grande` | File già molto compresso | Normale: tieni l'originale |
 | Tabelle vuote o storte | Terminale senza larghezza | Allarga la finestra; lo script usa già una larghezza fissa |
 | Errore con file dal nome strano | Caratteri speciali nel nome | Rinominalo; `[ ]` finali nel nome file confondono ImageMagick |
-| Output già presente non viene rifatto | Comportamento previsto | Attiva `Sovrascrivi` (`9`) oppure cancella l'output |
-| Audio: `libopus NON disponibile` | Build ffmpeg senza `libopus` | Installa una build *full* (gyan.dev o `Gyan.FFmpeg`) |
-| Audio: `SALTATO: output piu grande` | FLAC molto comprimibile (es. toni/rumore) | Normale: tieni il FLAC, oppure abbassa il bitrate in `K` |
-| Audio: gli artisti restano uniti | Il tag non usa `;` né più commenti `ARTIST` | La divisione avviene solo su `;`: sistema i tag alla fonte |
-| Audio: copertina assente nell'`opus` | Nessun file affiancato né picture nel FLAC | Aggiungi `cover.jpg` nella cartella sorgente, oppure attiva `L` |
-| Audio: `Tags: non scritti` | Scrittura dei commenti Ogg fallita | Il file resta valido ma senza tag: controlla la build di ffmpeg |
+| Output già presente non viene rifatto | Comportamento previsto | Attiva `Sovrascrivi` (`B`) oppure cancella l'output |
+| Audio: `libopus / libmp3lame NON disponibile` | Build ffmpeg senza l'encoder richiesto | Installa una build *full* (gyan.dev o `Gyan.FFmpeg`) |
+| Audio: gli artisti restano uniti | Il tag non usa `;` né più commenti `ARTIST` | La divisione avviene solo su `;` (in Opus): sistema i tag alla fonte |
+| Audio: copertina assente nella cartella di output | Nessun file affiancato né picture incorporata | Aggiungi `cover.jpg` nella cartella sorgente, oppure attiva `L` |
 
 ---
 
@@ -638,11 +659,9 @@ ffmpeg -hide_banner -loglevel error -y -i INPUT.FLAC -map 0:v:0 -c copy cover.jp
 - **La compressione JPEG→JPEG è sempre con perdita.** Qui è controllata, ma non è lossless.
 - **Un processo alla volta.** Non c'è parallelismo tra file (la GPU lavora, poi la CPU calcola VMAF/SSIM).
 - **Le metriche non sono onniscienti** (vedi [6.4](#64-limiti-delle-metriche)).
-- **Audio: la conversione è con perdita.** Da WAV/FLAC a Opus il contenuto cambia (a 128+ kb/s è di norma trasparente, ma non è lossless).
-- **Audio: solo WAV e FLAC in ingresso.** Non vengono toccati MP3, M4A, OGG, Opus, ecc.
-- **WAV: metadati limitati.** Si leggono solo i chunk `RIFF/INFO` (con fallback `ffprobe`); eventuali tag ID3v2 dentro il WAV non sono gestiti e il WAV non ha un concetto di artisti multipli.
-- **La copertina non viene incorporata nell'Opus** (di proposito): resta un file immagine nella cartella `opus`.
-- **La divisione degli artisti avviene solo sul `;`** o da più commenti `ARTIST`; non vengono interpretati altri separatori (`&`, `,`, `feat.`).
+- **Audio: la conversione è con perdita.** Verso Opus/M4A/AAC/MP3 il contenuto viene ricodificato.
+- **La copertina non viene incorporata nel file audio** (di proposito): viene scritta come `cover.jpeg` nella cartella dell'album.
+- **La divisione degli artisti multipli avviene solo in Opus** (sul separatore `;` o da più commenti `ARTIST`); non vengono interpretati altri separatori (`&`, `,`, `feat.`).
 - **Audio senza verifica di qualità:** non esiste una metrica equivalente a VMAF/SSIM, quindi non c'è retry automatico.
 
 ### 11.2 Cosa è stato verificato
@@ -655,8 +674,7 @@ ffmpeg -hide_banner -loglevel error -y -i INPUT.FLAC -map 0:v:0 -c copy cover.jp
 | Parte foto su **Windows PowerShell 5.1** e su foto **reali Sony** | **Non ancora verificata** |
 | Soglie foto di default (Q90, SSIM 0.990) | **Non calibrate** su foto reali |
 | Decodifica GPU nella misura VMAF | Non provata (nel mio ambiente non c'è QSV); è presente un fallback in software |
-| Conversione audio WAV/FLAC → Opus (tag, artisti multipli, copertina, CRC Ogg) | Provata su file sintetici con ffmpeg 9.0.1 (Windows) e Python: tag multipli separati, copertina copiata/estratta, file decodificabile, CRC delle pagine valido |
-| Conversione audio su **album reali** (vari tagger/formati) | **Non ancora verificata**: riporta eventuali tag mancanti o copertine non trovate |
+| Conversione e aggregazione audio (Opus/M4A/AAC/MP3, `mirror` e `artist_album`, tag multipli, `cover.jpeg`, `DeleteOriginals`) | Provata su file audio con ffmpeg (Windows PowerShell 5.1 e Python 3.12): tag multipli separati in Opus, aggregazione Artista/Album/Various Artists/Disc N, copertina estratta/copiata, eliminazione opzionale originali |
 
 Se qualcosa non va, riporta il messaggio mostrato a schermo (o la riga del log CSV): è il modo più rapido per correggere.
 
@@ -665,7 +683,7 @@ Se qualcosa non va, riporta il messaggio mostrato a schermo (o la riga del log C
 ## 12. FAQ
 
 **Posso cancellare gli originali dopo la compressione?**
-Solo dopo aver controllato a occhio qualche file (soprattutto i più scuri/difficili) e il riepilogo *DA CONTROLLARE*. Per i video da stabilizzare con Gyroflow tieni gli originali.
+Puoi farlo manualmente dopo aver controllato a occhio qualche file, oppure attivando l'opzione `[O] Elimina originali` in `[6] Impostazioni` (che elimina il sorgente solo se la conversione di quel singolo file termina con stato `OK`). Per i video da stabilizzare con Gyroflow tieni sempre gli originali.
 
 **Quanto spazio risparmio?**
 Dipende dalla sorgente e dalla scena. Sorgenti H.264 ad alto bitrate (Sony) arrivano facilmente al -75/-85%; sorgenti HEVC già efficienti (DJI) al -50/-70%.

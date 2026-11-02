@@ -3,7 +3,7 @@
 
 """
 .SYNOPSIS
-    Squeeze - riduzione di video (HEVC), foto (JPEG) e audio (Opus) con verifica qualita'.
+    Squeeze - riduzione di video (HEVC), foto (JPEG) e audio (Opus / M4A / AAC / MP3) con verifica qualita'.
 
 .DESCRIPTION
     TUI testuale centrata per:
@@ -15,10 +15,12 @@
       * gestire sia clip DJI sia Sony Alpha (audio PCM -> AAC per compatibilita' social,
         copia dei file XML/SRT affiancati, conversione 4:2:2 -> 4:2:0 quando serve)
       * comprimere le foto JPEG (Sony Alpha, ecc.) con ImageMagick, verificando SSIM e metadati
-      * convertire audio WAV/FLAC in Opus (>=128 kb/s), trasferendo i tag pari-pari (artisti
-        multipli come tag ARTIST separati) e salvando la copertina nella cartella "opus"
+      * convertire e aggregare librerie audio (FLAC, WAV, MP3, AIFF, M4A, AAC, OGG, WMA, APE, ALAC, Opus)
+        con focus principale su Opus (riscrittura nativa pagina Ogg OpusTags, artisti multipli come tag ARTIST
+        separati) e opzione per M4A (AAC), AAC (.aac) o MP3 (libmp3lame), modalita' mirror o aggregata
+        Artista/Album (Various Artists, Disc N) e salvataggio copertina (cover.jpeg / originale)
 
-    Gli originali non vengono mai modificati ne' cancellati.
+    Gli originali non vengono mai modificati; possono essere eliminati su richiesta dopo conversione riuscita (DeleteOriginals).
     Requisiti: Linux (Fedora), python3, ffmpeg e ffprobe nel PATH (build "full" con libvmaf
     e libopus); per le foto ImageMagick 7 (comando "magick"). exiftool e' opzionale (verifica metadati piu' precisa).
 """
@@ -80,6 +82,7 @@ cfg = {
     'AutoRetry': True,
     'MaxRetries': 2,
     'Overwrite': False,
+    'DeleteOriginals': False,
     'PreserveDates': True,
     'AudioMode': 'auto',
     'AacBitrate': 320,
@@ -92,10 +95,15 @@ cfg = {
     'PhotoVerify': True,
     'PhotoExtensions': ['.jpg', '.jpeg'],
     'Extensions': ['.mp4', '.mov'],
+    'AudioFormat': 'opus',
+    'AudioLayout': 'mirror',
+    'AudioOutDir': '',
+    'AudioFallbackArtist': 'Unknown',
+    'AudioFallbackAlbum': 'Unknown',
     'OpusBitrate': 160,
     'OpusCover': True,
-    'OpusExtensions': ['.wav', '.flac'],
-    'OpusCoverNames': ['cover', 'folder', 'front', 'album'],
+    'OpusExtensions': ['.wav', '.flac', '.mp3', '.aiff', '.aif', '.m4a', '.aac', '.ogg', '.oga', '.wma', '.ape', '.alac', '.opus'],
+    'OpusCoverNames': ['cover', 'folder', 'front', 'album', 'albumart', 'albumcover'],
     'OpusCoverExts': ['.jpg', '.jpeg', '.png']
 }
 
@@ -107,11 +115,22 @@ def import_config():
         else:
             return
     try:
-        with open(path, 'r', encoding='utf-8') as f:
+        with open(path, 'r', encoding='utf-8-sig') as f:
             loaded = json.load(f)
         for k, v in loaded.items():
             if k in cfg:
                 cfg[k] = v
+        # Auto-migrazione estensioni/cover audio da vecchi config solo WAV/FLAC
+        if isinstance(cfg.get('OpusExtensions'), list) and len(cfg['OpusExtensions']) == 2:
+            low_exts = [str(e).lower() for e in cfg['OpusExtensions']]
+            if '.wav' in low_exts and '.flac' in low_exts:
+                cfg['OpusExtensions'] = ['.wav', '.flac', '.mp3', '.aiff', '.aif', '.m4a', '.aac', '.ogg', '.oga', '.wma', '.ape', '.alac', '.opus']
+        if isinstance(cfg.get('OpusCoverNames'), list) and len(cfg['OpusCoverNames']) == 4:
+            cfg['OpusCoverNames'] = ['cover', 'folder', 'front', 'album', 'albumart', 'albumcover']
+        if cfg.get('AudioFormat') not in ('opus', 'm4a', 'aac', 'mp3'):
+            cfg['AudioFormat'] = 'opus'
+        if cfg.get('AudioLayout') not in ('mirror', 'artist_album'):
+            cfg['AudioLayout'] = 'mirror'
     except Exception:
         return
     if path != config_path:
@@ -196,7 +215,7 @@ def read_box_prompt(prompt_text="Scelta"):
     print_color(f"\n{pad}{prompt_text}: ", CYAN, end="")
     try:
         r = input()
-        if not r and not sys.stdin.isatty():
+        if not r and not sys.stdin.isatty() and prompt_text == "Scelta":
             return "0"
         return r.strip() if r else ""
     except (EOFError, KeyboardInterrupt):
@@ -251,14 +270,67 @@ def get_out_dir():
         return cfg['OutDir'].rstrip('/\\')
     return str(Path(cfg['SourceDir']) / 'out')
 
+def get_audio_format_spec(fmt=None):
+    if not fmt:
+        fmt = cfg.get('AudioFormat', 'opus')
+    f = str(fmt).lower()
+    if f == 'm4a':
+        return {'Key': 'm4a', 'Ext': '.m4a', 'Codec': 'aac', 'Muxer': 'ipod', 'Label': 'M4A (AAC)', 'DefaultDir': 'm4a', 'DefaultBitrate': 192, 'Bitrates': (128, 160, 192, 256, 320)}
+    elif f == 'aac':
+        return {'Key': 'aac', 'Ext': '.aac', 'Codec': 'aac', 'Muxer': 'adts', 'Label': 'AAC (.aac)', 'DefaultDir': 'aac', 'DefaultBitrate': 192, 'Bitrates': (128, 160, 192, 256, 320)}
+    elif f == 'mp3':
+        return {'Key': 'mp3', 'Ext': '.mp3', 'Codec': 'libmp3lame', 'Muxer': 'mp3', 'Label': 'MP3 (LAME)', 'DefaultDir': 'mp3', 'DefaultBitrate': 192, 'Bitrates': (128, 160, 192, 256, 320)}
+    else:
+        return {'Key': 'opus', 'Ext': '.opus', 'Codec': 'libopus', 'Muxer': 'opus', 'Label': 'Opus', 'DefaultDir': 'opus', 'DefaultBitrate': 160, 'Bitrates': (96, 128, 160, 192, 256)}
+
 def get_opus_dir():
-    return str(Path(cfg['SourceDir']) / 'opus')
+    spec = get_audio_format_spec(cfg.get('AudioFormat', 'opus'))
+    sub = cfg.get('AudioOutDir', '').strip()
+    if not sub:
+        sub = spec['DefaultDir']
+    if os.path.isabs(sub):
+        return sub.rstrip('/\\')
+    return str(Path(cfg['SourceDir']) / sub)
+
+def test_audio_encoder_available(fmt=None):
+    if not has_ffmpeg:
+        return False
+    spec = get_audio_format_spec(fmt)
+    k = spec['Key']
+    if k == 'mp3':
+        return has_mp3
+    if k in ('m4a', 'aac'):
+        return has_aac
+    return has_opus
+
+def remove_source_file(src_path, dst_path):
+    if not src_path or not dst_path:
+        return False
+    try:
+        sp = os.path.abspath(str(src_path))
+        dp = os.path.abspath(str(dst_path))
+        if sp.lower() == dp.lower() if os.name == 'nt' else sp == dp:
+            return False
+        if not os.path.isfile(dp) or os.path.getsize(dp) <= 0:
+            return False
+        if not os.path.isfile(sp):
+            return False
+        try:
+            os.remove(sp)
+            return not os.path.exists(sp)
+        except OSError:
+            os.chmod(sp, 0o666)
+            os.remove(sp)
+            return not os.path.exists(sp)
+    except Exception:
+        return False
 
 def is_under(path, directory):
-    if not directory:
+    if not directory or not path:
         return False
     d = str(directory).rstrip('/\\') + os.sep
-    return str(path).startswith(d)
+    p = str(path)
+    return p.lower().startswith(d.lower()) if os.name == 'nt' else p.startswith(d)
 
 def format_table(rows, columns):
     if not rows:
@@ -285,6 +357,8 @@ has_vmaf = False
 nvenc_works = False
 qsv_works = False
 has_opus = False
+has_mp3 = False
+has_aac = False
 
 has_ffmpeg = False
 magick_exe = None
@@ -292,7 +366,7 @@ magick_ssim = False
 exiftool_exe = None
 
 def test_tools():
-    global has_ffmpeg, has_x265, has_vmaf, nvenc_works, qsv_works, has_opus, magick_exe, magick_ssim, exiftool_exe
+    global has_ffmpeg, has_x265, has_vmaf, nvenc_works, qsv_works, has_opus, has_mp3, has_aac, magick_exe, magick_ssim, exiftool_exe
     
     has_ffmpeg = bool(shutil.which('ffmpeg') and shutil.which('ffprobe'))
     magick_exe = shutil.which('magick')
@@ -311,21 +385,23 @@ def test_tools():
             has_x265 = 'libx265' in enc
             has_vmaf = 'libvmaf' in flt
             has_opus = 'libopus' in enc
+            has_mp3 = 'libmp3lame' in enc
+            has_aac = bool(re.search(r'\baac\b', enc))
             
             if 'hevc_nvenc' in enc:
-                nv_cmd = ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'color=c=black:s=1280x720:d=0.2',
+                nv_cmd = ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-nostdin', '-f', 'lavfi', '-i', 'color=c=black:s=1280x720:d=0.2',
                           '-vf', 'format=p010le', '-c:v', 'hevc_nvenc', '-profile:v', 'main10', '-f', 'null', '-']
                 res_nv = subprocess.run(nv_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 if res_nv.returncode == 0:
                     nvenc_works = True
                 else:
-                    nv_cmd8 = ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'color=c=black:s=1280x720:d=0.2',
+                    nv_cmd8 = ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-nostdin', '-f', 'lavfi', '-i', 'color=c=black:s=1280x720:d=0.2',
                                '-vf', 'format=nv12', '-c:v', 'hevc_nvenc', '-profile:v', 'main', '-f', 'null', '-']
                     res_nv8 = subprocess.run(nv_cmd8, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                     nvenc_works = (res_nv8.returncode == 0)
 
             if 'hevc_qsv' in enc:
-                qsv_cmd = ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'color=c=black:s=1280x720:d=0.2']
+                qsv_cmd = ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-nostdin', '-f', 'lavfi', '-i', 'color=c=black:s=1280x720:d=0.2']
                 if os.path.exists('/dev/dri/renderD128'):
                     qsv_cmd.extend(['-qsv_device', '/dev/dri/renderD128'])
                 qsv_cmd.extend(['-vf', 'format=p010le', '-c:v', 'hevc_qsv', '-profile:v', 'main10', '-f', 'null', '-'])
@@ -466,14 +542,28 @@ def get_media_files(kind='video'):
     else:
         exts = [e.lower() for e in cfg['Extensions']]
 
-    exclude = [get_out_dir(), get_opus_dir()]
+    exclude = [
+        get_out_dir(),
+        get_opus_dir(),
+        str(src / 'opus'),
+        str(src / 'm4a'),
+        str(src / 'aac'),
+        str(src / 'mp3'),
+        str(src / 'out')
+    ]
     
+    do_recurse = bool(cfg['Recurse'] or (kind == 'audio' and cfg.get('AudioLayout') == 'artist_album'))
     files = []
-    iterator = src.rglob('*') if cfg['Recurse'] else src.iterdir()
+    iterator = src.rglob('*') if do_recurse else src.iterdir()
     for f in iterator:
         if f.is_file() and f.suffix.lower() in exts:
             if not any(is_under(f, d) for d in exclude):
                 files.append(f)
+    if kind == 'audio' and not files and not do_recurse:
+        for f in src.rglob('*'):
+            if f.is_file() and f.suffix.lower() in exts:
+                if not any(is_under(f, d) for d in exclude):
+                    files.append(f)
     files.sort()
     return files
 
@@ -891,7 +981,7 @@ def invoke_photo_job(file_path, mode, src_root, out_root):
     return row
 
 # ----------------------------------------------------------------------------
-#  AUDIO (WAV/FLAC -> Opus)
+#  AUDIO (musNav + OpusTags nativo: Opus / M4A / AAC / MP3)
 # ----------------------------------------------------------------------------
 RIFF_INFO_MAP = {
     'IART': 'ARTIST', 'INAM': 'TITLE', 'IPRD': 'ALBUM', 'ICRD': 'DATE', 'IGNR': 'GENRE',
@@ -899,6 +989,327 @@ RIFF_INFO_MAP = {
     'IENG': 'ENGINEER', 'IWRI': 'WRITER', 'IMUS': 'COMPOSER', 'IALK': 'ALBUMARTIST',
     'ILNG': 'LANGUAGE', 'IBPM': 'BPM', 'IKEY': 'KEY'
 }
+
+VA_VALUES = {'various artists', 'various', 'va', 'v.a.', 'v/a', 'compilation', 'vari', 'artisti vari'}
+INVALID_FS_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+def normalize_tag_key(key):
+    if not key:
+        return ''
+    return re.sub(r'[^a-z0-9]', '', str(key).lower())
+
+def get_tag_value(tags, *candidates):
+    if not tags:
+        return None
+    norm = {}
+    for k, v in tags.items():
+        if v is None:
+            continue
+        s = str(v).strip()
+        if s:
+            norm[normalize_tag_key(k)] = s
+    for c in candidates:
+        nc = normalize_tag_key(c)
+        if nc in norm:
+            return norm[nc]
+    return None
+
+def get_first_tag_value(raw):
+    if not raw:
+        return None
+    parts = [p.strip() for p in re.split(r'[;\x00/]', str(raw)) if p.strip()]
+    return parts[0] if parts else str(raw).strip()
+
+def get_track_number(raw):
+    if not raw:
+        return None
+    m = re.match(r'^\s*(\d+)', str(raw))
+    if not m:
+        return None
+    try:
+        n = int(m.group(1))
+        return n if n > 0 else None
+    except ValueError:
+        return None
+
+def sanitize_filename(name, fallback='Unknown'):
+    s = (name or '').strip()
+    s = INVALID_FS_CHARS.sub('_', s)
+    s = re.sub(r'\s+', ' ', s).strip().rstrip('. ')
+    if len(s) > 120:
+        s = s[:120].rstrip('. ')
+    if re.match(r'^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$', s, re.IGNORECASE):
+        s = f"_{s}"
+    return s if s else fallback
+
+def is_various_artists(album_artist, compilation):
+    if compilation and str(compilation).strip().lower() in ('1', 'true', 'yes'):
+        return True
+    if album_artist and str(album_artist).strip().lower() in VA_VALUES:
+        return True
+    return False
+
+def format_duration(seconds):
+    if not seconds or seconds <= 0:
+        return '0s'
+    total = int(round(seconds))
+    h, rem = divmod(total, 3600)
+    m, s = divmod(rem, 60)
+    if h:
+        return f"{h}h {m:02d}m"
+    if m:
+        return f"{m}m {s:02d}s"
+    return f"{s}s"
+
+def format_sample_rate(sr):
+    if not sr:
+        return '? Hz'
+    if sr % 1000 == 0:
+        return f"{sr // 1000} kHz"
+    return f"{sr / 1000:.1f} kHz"
+
+def get_audio_info(path):
+    p = Path(path)
+    size = p.stat().st_size if p.exists() else 0
+    info = {
+        'Path': p,
+        'Size': size,
+        'Duration': 0.0,
+        'Codec': p.suffix.lstrip('.').lower(),
+        'SampleRate': 0,
+        'Channels': 0,
+        'BitsPerSample': 0,
+        'BitRate': 0,
+        'HasEmbeddedCover': False,
+        'EmbeddedCoverCodec': None,
+        'Title': None,
+        'Artist': None,
+        'Album': None,
+        'AlbumArtist': None,
+        'Track': None,
+        'Disc': None,
+        'DiscTotal': None,
+        'Date': None,
+        'Genre': None,
+        'Compilation': False,
+        'TagCount': 0
+    }
+    cmd = ['ffprobe', '-v', 'error', '-show_format', '-show_streams', '-of', 'json', str(path)]
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='replace')
+        data = json.loads(res.stdout) if res.stdout else {}
+    except Exception:
+        return info
+    if not data:
+        return info
+
+    fmt = data.get('format') or {}
+    try:
+        info['Duration'] = float(fmt.get('duration') or 0.0)
+    except (ValueError, TypeError):
+        pass
+    try:
+        info['BitRate'] = int(fmt.get('bit_rate') or 0)
+    except (ValueError, TypeError):
+        pass
+
+    tags = {}
+    fmt_tags = fmt.get('tags') or {}
+    for k, v in fmt_tags.items():
+        tags[k] = v
+
+    audio_stream = None
+    for st in (data.get('streams') or []):
+        st_type = st.get('codec_type')
+        disp = st.get('disposition') or {}
+        if st_type == 'audio' and audio_stream is None:
+            audio_stream = st
+            st_tags = st.get('tags') or {}
+            for k, v in st_tags.items():
+                if k not in tags:
+                    tags[k] = v
+        elif st_type == 'video':
+            c_name = (st.get('codec_name') or '').lower()
+            if disp.get('attached_pic') == 1 or c_name in ('mjpeg', 'png', 'webp', 'bmp'):
+                info['HasEmbeddedCover'] = True
+                info['EmbeddedCoverCodec'] = c_name
+
+    if audio_stream:
+        if audio_stream.get('codec_name'):
+            info['Codec'] = str(audio_stream['codec_name']).lower()
+        try:
+            info['SampleRate'] = int(audio_stream.get('sample_rate') or 0)
+        except (ValueError, TypeError):
+            pass
+        try:
+            info['Channels'] = int(audio_stream.get('channels') or 0)
+        except (ValueError, TypeError):
+            pass
+        bps = audio_stream.get('bits_per_raw_sample') or audio_stream.get('bits_per_sample') or 0
+        try:
+            info['BitsPerSample'] = int(bps)
+        except (ValueError, TypeError):
+            pass
+        if not info['BitRate']:
+            try:
+                info['BitRate'] = int(audio_stream.get('bit_rate') or 0)
+            except (ValueError, TypeError):
+                pass
+
+    try:
+        if p.suffix.lower() in ('.flac', '.wav'):
+            for c in get_source_comments(str(path)):
+                if '=' in c:
+                    ck, cv = c.split('=', 1)
+                    ck = ck.strip()
+                    cv = cv.strip()
+                    if ck and cv and ck not in tags:
+                        tags[ck] = cv
+    except Exception:
+        pass
+
+    info['TagCount'] = len(tags)
+    info['Title'] = get_tag_value(tags, 'title')
+    info['Artist'] = get_first_tag_value(get_tag_value(tags, 'artist', 'performer', 'author'))
+    info['Album'] = get_tag_value(tags, 'album')
+    info['AlbumArtist'] = get_first_tag_value(get_tag_value(tags, 'albumartist', 'album_artist', 'album artist', 'band', 'ensemble'))
+    info['Track'] = get_track_number(get_tag_value(tags, 'track', 'tracknumber', 'trkn'))
+    disc_raw = get_tag_value(tags, 'disc', 'discnumber', 'disk', 'disknumber', 'tpos')
+    if disc_raw:
+        parts = str(disc_raw).split('/')
+        if parts[0].strip():
+            info['Disc'] = get_track_number(parts[0])
+        if len(parts) > 1 and parts[1].strip():
+            info['DiscTotal'] = get_track_number(parts[1])
+    info['Date'] = get_tag_value(tags, 'date', 'year', 'originaldate', 'tdrc')
+    info['Genre'] = get_tag_value(tags, 'genre')
+    comp_raw = get_tag_value(tags, 'compilation', 'TCMP', 'cpil', 'itunescompilation')
+    info['Compilation'] = is_various_artists(info['AlbumArtist'] or info['Artist'], comp_raw)
+    return info
+
+def artist_album_path(info, out_root, fallback_artist, fallback_album, multi_disc_albums, out_ext='.opus'):
+    if info['Compilation']:
+        folder_artist = 'Various Artists'
+    else:
+        raw_artist = info['AlbumArtist'] or info['Artist'] or fallback_artist
+        folder_artist = sanitize_filename(raw_artist, fallback_artist)
+    raw_album = info['Album'] or fallback_album
+    folder_album = sanitize_filename(raw_album, fallback_album)
+
+    album_key = (folder_artist.lower(), folder_album.lower())
+    album_dir = Path(out_root) / folder_artist / folder_album
+    if (info.get('DiscTotal') and info['DiscTotal'] > 1) or (album_key in multi_disc_albums):
+        album_dir = album_dir / f"Disc {info['Disc'] or 1}"
+
+    raw_title = info['Title'] or info['Path'].stem
+    title = sanitize_filename(raw_title, info['Path'].stem)
+    if info['Compilation']:
+        t_artist = sanitize_filename(info['Artist'] or fallback_artist, fallback_artist)
+        if info['Track']:
+            fname = f"{info['Track']:02d} - {t_artist} - {title}{out_ext}"
+        else:
+            fname = f"{t_artist} - {title}{out_ext}"
+    else:
+        if info['Track']:
+            fname = f"{info['Track']:02d} - {title}{out_ext}"
+        else:
+            fname = f"{title}{out_ext}"
+    return album_dir / fname
+
+def plan_audio_outputs(infos, src_root, out_root, layout, fallback_artist, fallback_album, out_ext='.opus', overwrite=False):
+    disc_Tracker = {}
+    multi_disc = set()
+    for i in infos:
+        fa = 'Various Artists' if i['Compilation'] else sanitize_filename(i['AlbumArtist'] or i['Artist'] or fallback_artist, fallback_artist)
+        fl = sanitize_filename(i['Album'] or fallback_album, fallback_album)
+        key = (fa.lower(), fl.lower())
+        if i.get('DiscTotal') and i['DiscTotal'] > 1:
+            multi_disc.add(key)
+        if i['Disc']:
+            disc_Tracker.setdefault(key, set()).add(i['Disc'])
+    multi_disc |= {k for k, v in disc_Tracker.items() if len(v) > 1 or (len(v) == 1 and next(iter(v)) > 1)}
+
+    used = set()
+    plan = []
+    src_root_str = str(src_root).rstrip('/\\')
+    out_root_str = str(out_root).rstrip('/\\')
+    for i in infos:
+        src_path = i['Path']
+        if is_under(str(src_path), out_root_str):
+            plan.append({'Info': i, 'Dst': src_path, 'Skip': True, 'Reason': 'ESISTENTE'})
+            continue
+        if out_ext.lower() == '.opus' and src_path.suffix.lower() == '.opus':
+            plan.append({'Info': i, 'Dst': src_path, 'Skip': True, 'Reason': 'GIA OPUS'})
+            continue
+
+        if layout == 'mirror':
+            src_str = str(src_path)
+            rel = src_str[len(src_root_str):].lstrip('/\\')
+            dst = (Path(out_root) / rel).with_suffix(out_ext)
+        else:
+            dst = artist_album_path(i, out_root, fallback_artist, fallback_album, multi_disc, out_ext)
+
+        if dst.exists() and not overwrite:
+            plan.append({'Info': i, 'Dst': dst, 'Skip': True, 'Reason': 'ESISTENTE'})
+            continue
+
+        candidate = dst
+        n = 2
+        while str(candidate).lower() in used:
+            candidate = dst.with_name(f"{dst.stem} ({n}){dst.suffix}")
+            n += 1
+        used.add(str(candidate).lower())
+        plan.append({'Info': i, 'Dst': candidate, 'Skip': False, 'Reason': ''})
+    return plan
+
+def find_folder_cover(folder):
+    p = Path(folder)
+    if not p.is_dir():
+        return None
+    try:
+        entries = {f.name.lower(): f for f in p.iterdir() if f.is_file()}
+    except Exception:
+        return None
+    for name in cfg['OpusCoverNames']:
+        for ext in cfg['OpusCoverExts']:
+            hit = entries.get(f"{name.lower()}{ext.lower()}")
+            if hit:
+                return hit
+    return None
+
+def write_folder_cover(dst_dir, embedded_src, folder_img):
+    os.makedirs(dst_dir, exist_ok=True)
+    target = os.path.join(dst_dir, 'cover.jpeg')
+    if os.path.exists(target) and not cfg['Overwrite']:
+        return 'presente'
+    if embedded_src is not None:
+        codec = embedded_src.get('EmbeddedCoverCodec')
+        stream_args = ['-c:v', 'copy'] if codec in ('mjpeg', 'jpeg') else ['-c:v', 'mjpeg', '-q:v', '2']
+        cmd = ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
+               '-i', str(embedded_src['Path']), '-map', '0:v:0', '-frames:v', '1'] + stream_args + [target]
+        try:
+            res = subprocess.run(cmd, capture_output=True, text=True)
+            if res.returncode == 0 and os.path.exists(target) and os.path.getsize(target) > 0:
+                return 'estratta'
+        except Exception:
+            pass
+    if folder_img is not None and os.path.isfile(str(folder_img)):
+        ext = Path(folder_img).suffix.lower()
+        if ext in ('.jpg', '.jpeg'):
+            try:
+                shutil.copy2(str(folder_img), target)
+                return 'copiata'
+            except Exception:
+                return '-'
+        cmd = ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
+               '-i', str(folder_img), '-frames:v', '1', '-c:v', 'mjpeg', '-q:v', '2', target]
+        try:
+            res = subprocess.run(cmd, capture_output=True, text=True)
+            if res.returncode == 0 and os.path.exists(target) and os.path.getsize(target) > 0:
+                return 'convertita'
+        except Exception:
+            pass
+    return '-'
 
 def get_flac_comments(path):
     comments = []
@@ -969,12 +1380,22 @@ def get_riff_info_comments(path):
     return comments
 
 def get_ffprobe_comments(path):
-    cmd = ['ffprobe', '-v', 'error', '-show_entries', 'format_tags', '-of', 'json', path]
+    cmd = ['ffprobe', '-v', 'error', '-show_entries', 'format_tags:stream_tags', '-of', 'json', path]
     try:
-        res = subprocess.run(cmd, capture_output=True, text=True)
+        res = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='replace')
         o = json.loads(res.stdout)
-        tags = o.get('format', {}).get('tags', {})
-        return [f"{k}={v}" for k, v in tags.items()]
+        seen = set()
+        out = []
+        tags = o.get('format', {}).get('tags', {}) or {}
+        for k, v in tags.items():
+            seen.add(k.upper())
+            out.append(f"{k}={v}")
+        for st in (o.get('streams') or []):
+            for k, v in (st.get('tags') or {}).items():
+                if k.upper() not in seen:
+                    seen.add(k.upper())
+                    out.append(f"{k}={v}")
+        return out
     except Exception:
         return []
 
@@ -995,7 +1416,7 @@ def get_opus_comments(comments):
     for c in comments:
         if '=' not in c: continue
         key, val = c.split('=', 1)
-        if re.match(r'^(?i)(METADATA_BLOCK_PICTURE|COVERART|COVERARTMIME)$', key):
+        if key.strip().upper() in ('METADATA_BLOCK_PICTURE', 'COVERART', 'COVERARTMIME'):
             continue
         if key.upper() == 'ARTIST' and ';' in val:
             for a in val.split(';'):
@@ -1157,54 +1578,62 @@ def set_opus_tags(path, comments):
         return False
 
 def extract_audio_cover(src, out_dir):
+    dst = os.path.join(out_dir, 'cover.jpeg')
     cmd = ['ffprobe', '-v', 'error', '-select_streams', 'v', '-show_entries', 'stream=codec_name', '-of', 'json', src]
     try:
         res = subprocess.run(cmd, capture_output=True, text=True)
         o = json.loads(res.stdout)
         if not o or 'streams' not in o or len(o['streams']) == 0:
             return None
-        codec = o['streams'][0].get('codec_name', '')
-        ext = '.png' if codec == 'png' else ('.webp' if codec == 'webp' else '.jpg')
-        dst = os.path.join(out_dir, f"cover{ext}")
-        subprocess.run(['ffmpeg', '-hide_banner', '-loglevel', 'error', '-y', '-i', src, '-map', '0:v:0', '-c', 'copy', dst])
-        if os.path.exists(dst):
+        codec = (o['streams'][0].get('codec_name') or '').lower()
+        stream_args = ['-c:v', 'copy'] if codec in ('mjpeg', 'jpeg') else ['-c:v', 'mjpeg', '-q:v', '2']
+        subprocess.run(['ffmpeg', '-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
+                        '-i', src, '-map', '0:v:0', '-frames:v', '1'] + stream_args + [dst])
+        if os.path.exists(dst) and os.path.getsize(dst) > 0:
             return dst
     except Exception:
         pass
     return None
 
 def test_cover_present(dir_path):
+    if os.path.exists(os.path.join(dir_path, 'cover.jpeg')) or os.path.exists(os.path.join(dir_path, 'cover.jpg')) or os.path.exists(os.path.join(dir_path, 'cover.png')):
+        return True
     for n in cfg['OpusCoverNames']:
         for e in cfg['OpusCoverExts']:
             if os.path.exists(os.path.join(dir_path, n + e)):
                 return True
-    return os.path.exists(os.path.join(dir_path, 'cover.jpg')) or os.path.exists(os.path.join(dir_path, 'cover.png'))
+    return False
 
-def set_audio_cover(file_path, dst):
+def set_audio_cover(file_path, dst, info=None):
     out_dir = os.path.dirname(dst)
-    if test_cover_present(out_dir):
+    if test_cover_present(out_dir) and not cfg['Overwrite']:
         return 'presente'
     p = Path(file_path)
-    for n in cfg['OpusCoverNames']:
-        for e in cfg['OpusCoverExts']:
-            src_cover = p.parent / (n + e)
-            if src_cover.is_file():
-                shutil.copy2(src_cover, Path(out_dir) / src_cover.name)
-                return 'copiata'
+    folder_img = find_folder_cover(p.parent)
+    emb_info = info if (info and info.get('HasEmbeddedCover')) else None
+    if emb_info or folder_img:
+        return write_folder_cover(out_dir, emb_info, folder_img)
     if extract_audio_cover(str(file_path), out_dir):
         return 'estratta'
     return '-'
 
-def invoke_audio_job(file_path, src_root, out_root):
+def invoke_audio_job(file_path, src_root, out_root, dst_path=None, info=None, skip=False, skip_reason=''):
     src_str = str(file_path)
     rel = src_str[len(src_root):].lstrip('/\\')
-    p = Path(rel)
-    dst = os.path.join(out_root, str(p.with_suffix('.opus')))
-    
+    spec = get_audio_format_spec(cfg.get('AudioFormat', 'opus'))
+    dst = str(dst_path) if dst_path else os.path.join(out_root, str(Path(rel).with_suffix(spec['Ext'])))
+    out_rel = dst[len(out_root):].lstrip('/\\') if dst.startswith(out_root) else os.path.basename(dst)
+    display_file = f"{rel} -> {out_rel}" if (cfg.get('AudioLayout') == 'artist_album' and not skip) else rel
+
     f_stat = os.stat(src_str)
     f_size = f_stat.st_size
-    row = {'File': rel, 'InMB': round(f_size / (1024*1024), 1), 'OutMB': None,
-           'Saved': None, 'Bitrate': cfg['OpusBitrate'], 'Tags': '-', 'Cover': '-', 'Status': ''}
+    row = {'File': display_file, 'InMB': round(f_size / (1024*1024), 1), 'OutMB': None,
+           'Saved': None, 'Formato': spec['Key'].upper(), 'Bitrate': cfg['OpusBitrate'], 'Tags': '-', 'Cover': '-', 'Status': '',
+           '_SrcPath': src_str, '_DstPath': dst}
+
+    if skip:
+        row['Status'] = skip_reason if skip_reason else 'ESISTENTE'
+        return row
 
     if os.path.exists(dst) and not cfg['Overwrite']:
         row['Status'] = 'ESISTENTE'
@@ -1214,23 +1643,40 @@ def invoke_audio_job(file_path, src_root, out_root):
     comments = get_opus_comments(get_source_comments(src_str))
 
     part = dst + ".part"
-    ff_args = ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-stats', '-y', '-i', src_str,
-               '-map', '0:a:0', '-vn', '-map_metadata', '-1',
-               '-c:a', 'libopus', '-b:a', f"{cfg['OpusBitrate']}k", '-vbr', 'on',
-               '-application', 'audio', '-f', 'opus', part]
+    if spec['Key'] == 'opus':
+        ff_args = ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-nostdin', '-stats', '-y', '-i', src_str,
+                   '-map', '0:a:0', '-vn', '-map_metadata', '0', '-map_metadata:s:a', '0:s:a',
+                   '-c:a', 'libopus', '-b:a', f"{cfg['OpusBitrate']}k", '-vbr', 'on',
+                   '-application', 'audio', '-f', 'opus', part]
+    elif spec['Key'] == 'm4a':
+        ff_args = ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-nostdin', '-stats', '-y', '-i', src_str,
+                   '-map', '0:a:0', '-vn', '-map_metadata', '0', '-map_metadata:s:a', '0:s:a',
+                   '-c:a', 'aac', '-b:a', f"{cfg['OpusBitrate']}k", '-movflags', '+faststart', '-f', 'ipod', part]
+    elif spec['Key'] == 'aac':
+        ff_args = ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-nostdin', '-stats', '-y', '-i', src_str,
+                   '-map', '0:a:0', '-vn', '-map_metadata', '0', '-map_metadata:s:a', '0:s:a',
+                   '-c:a', 'aac', '-b:a', f"{cfg['OpusBitrate']}k", '-write_id3v2', '1', '-f', 'adts', part]
+    else:
+        ff_args = ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-nostdin', '-stats', '-y', '-i', src_str,
+                   '-map', '0:a:0', '-vn', '-map_metadata', '0', '-map_metadata:s:a', '0:s:a',
+                   '-c:a', 'libmp3lame', '-b:a', f"{cfg['OpusBitrate']}k", '-id3v2_version', '3', '-f', 'mp3', part]
+
     try:
-        print_color(f"   encode Opus {cfg['OpusBitrate']}k ...", GRAY)
+        print_color(f"   encode {spec['Label']} {cfg['OpusBitrate']}k ...", GRAY)
         res = subprocess.run(ff_args)
         if res.returncode != 0 or not os.path.exists(part):
             row['Status'] = 'ERRORE ffmpeg'
             return row
-        try:
-            if set_opus_tags(part, comments):
-                row['Tags'] = len(comments)
-            else:
-                row['Tags'] = 'non scritti'
-        except Exception:
-            row['Tags'] = 'non scritti'
+        if spec['Key'] == 'opus':
+            try:
+                if set_opus_tags(part, comments):
+                    row['Tags'] = len(comments)
+                else:
+                    row['Tags'] = len(comments) if comments else 'ffmpeg'
+            except Exception:
+                row['Tags'] = 'ffmpeg'
+        else:
+            row['Tags'] = len(comments) if comments else (info['TagCount'] if info else 'copiati')
         os.replace(part, dst)
     finally:
         if os.path.exists(part):
@@ -1238,24 +1684,134 @@ def invoke_audio_job(file_path, src_root, out_root):
             except Exception: pass
 
     if cfg['OpusCover']:
-        row['Cover'] = set_audio_cover(src_str, dst)
+        row['Cover'] = set_audio_cover(src_str, dst, info=info)
 
     if os.path.exists(dst):
         out_len = os.path.getsize(dst)
         row['OutMB'] = round(out_len / (1024*1024), 1)
-        row['Saved'] = round((1 - out_len / f_size) * 100, 0)
-        if out_len >= f_size:
-            os.remove(dst)
-            row['Status'] = 'SALTATO: output piu grande'
-            row['OutMB'] = None
-            row['Saved'] = None
-        else:
-            row['Status'] = 'OK'
-            if cfg['PreserveDates']:
-                try: os.utime(dst, (f_stat.st_atime, f_stat.st_mtime))
-                except Exception: pass
+        row['Saved'] = round((1 - out_len / f_size) * 100, 0) if f_size > 0 else 0
+        row['Status'] = 'OK'
+        if cfg['PreserveDates']:
+            try: os.utime(dst, (f_stat.st_atime, f_stat.st_mtime))
+            except Exception: pass
 
     return row
+
+def write_audio_summary(infos, src_root):
+    if not infos:
+        return
+    total_bytes = sum(i['Size'] for i in infos)
+    total_dur = sum(i['Duration'] for i in infos)
+    by_codec = {}
+    srs = {}
+    tagged = 0
+    with_artist_album = 0
+    embedded_covers = 0
+    folders_with_audio = set()
+    artists = set()
+    albums = set()
+    compilations = 0
+
+    for i in infos:
+        k = (i['Codec'] or '?').upper()
+        if i['BitsPerSample']:
+            k = f"{k} {i['BitsPerSample']}b"
+        by_codec[k] = by_codec.get(k, 0) + 1
+        if i['SampleRate']:
+            sr_txt = format_sample_rate(i['SampleRate'])
+            srs[sr_txt] = srs.get(sr_txt, 0) + 1
+        if i['Title'] or i['Artist'] or i['Album']:
+            tagged += 1
+        if (i['Artist'] or i['AlbumArtist']) and i['Album']:
+            with_artist_album += 1
+        if i['HasEmbeddedCover']:
+            embedded_covers += 1
+        if i['Compilation']:
+            compilations += 1
+        folders_with_audio.add(str(i['Path'].parent))
+        eff_artist = 'Various Artists' if i['Compilation'] else (i['AlbumArtist'] or i['Artist'])
+        if eff_artist:
+            artists.add(eff_artist.lower())
+        if i['Album']:
+            albums.add(((eff_artist or '').lower(), i['Album'].lower()))
+
+    folder_covers = sum(1 for fld in folders_with_audio if find_folder_cover(fld) is not None)
+    codec_str = ', '.join(f"{v} {k}" for k, v in sorted(by_codec.items(), key=lambda x: -x[1]))
+    sr_str = ', '.join(f"{v}x {k}" for k, v in sorted(srs.items(), key=lambda x: -x[1])) or 'n/d'
+    total_mb = round(total_bytes / (1024*1024), 1)
+    comp_note = f" ({compilations} tracce compilation -> Various Artists)" if compilations else ''
+
+    write_box_line(f"  Tracce / Durata   : {len(infos)} tracce ({total_mb} MB) • {format_duration(total_dur)}")
+    write_box_line(f"  Sorgenti          : {codec_str}", color=GRAY)
+    write_box_line(f"  Sample rate       : {sr_str}", color=GRAY)
+    write_box_line(f"  Tag               : {tagged}/{len(infos)} con tag, {with_artist_album}/{len(infos)} con Artista+Album", color=GRAY)
+    write_box_line(f"   Libreria         : ~{len(artists)} artisti, ~{len(albums)} album{comp_note}", color=GRAY)
+    write_box_line(f"  Copertine         : {embedded_covers} incorporate, {folder_covers}/{len(folders_with_audio)} cartelle con immagine", color=GRAY)
+
+def write_audio_dry_run_preview(plan, src_root, out_root, limit=12):
+    pad = get_box_pad(BOX_WIDTH)
+    active = [p for p in plan if not p.get('Skip')]
+    skipped = len(plan) - len(active)
+    print()
+    skip_note = f"  [saltati: {skipped}]" if skipped > 0 else ""
+    print_color(f"{pad}Anteprima mapping ({min(limit, len(active))} di {len(active)} da convertire){skip_note}:", CYAN)
+    src_root_str = str(src_root).rstrip('/\\')
+    out_root_str = str(out_root).rstrip('/\\')
+    for item in active[:limit]:
+        info = item['Info']
+        dst = item['Dst']
+        s_str = str(info['Path'])
+        d_str = str(dst)
+        rel_src = s_str[len(src_root_str):].lstrip('/\\') if s_str.startswith(src_root_str) else info['Path'].name
+        rel_dst = d_str[len(out_root_str):].lstrip('/\\') if d_str.startswith(out_root_str) else dst.name
+        print_color(f"{pad}  {rel_src}", GRAY)
+        print_color(f"{pad}    -> {rel_dst}", GREEN)
+    if len(active) > limit:
+        print_color(f"{pad}  ... e altri {len(active) - limit} file", GRAY)
+
+def read_audio_fallbacks(infos):
+    missing_artist = sum(1 for i in infos if not (i['AlbumArtist'] or i['Artist'] or i['Compilation']))
+    missing_album = sum(1 for i in infos if not i['Album'])
+    fb_artist = cfg.get('AudioFallbackArtist') or 'Unknown'
+    fb_album = cfg.get('AudioFallbackAlbum') or 'Unknown'
+    if missing_artist > 0:
+        pad = get_box_pad(BOX_WIDTH)
+        print_color(f"\n{pad}! {missing_artist} tracce senza tag Artista.", YELLOW)
+        fb_artist = sanitize_filename(read_default(f"{pad}Cartella Artista di fallback", fb_artist), 'Unknown')
+        cfg['AudioFallbackArtist'] = fb_artist
+    if missing_album > 0:
+        pad = get_box_pad(BOX_WIDTH)
+        print_color(f"\n{pad}! {missing_album} tracce senza tag Album.", YELLOW)
+        fb_album = sanitize_filename(read_default(f"{pad}Cartella Album di fallback", fb_album), 'Unknown')
+        cfg['AudioFallbackAlbum'] = fb_album
+    return fb_artist, fb_album
+
+def invoke_audio_quick_options(audio_infos=None):
+    pad = get_box_pad(BOX_WIDTH)
+    print()
+    print_color(f"{pad}--- Opzioni rapide Audio (musNav) ---", CYAN)
+    prev_fmt = cfg['AudioFormat']
+    fmt = read_default(f"{pad}Formato output (opus / m4a / aac / mp3)", cfg['AudioFormat']).lower()
+    if fmt in ('opus', 'm4a', 'aac', 'mp3'):
+        cfg['AudioFormat'] = fmt
+    spec = get_audio_format_spec(cfg['AudioFormat'])
+    def_br = spec['DefaultBitrate'] if (cfg['AudioFormat'] != prev_fmt and int(cfg['OpusBitrate']) not in spec['Bitrates']) else int(cfg['OpusBitrate'])
+    cfg['OpusBitrate'] = read_int_range(f"{pad}Bitrate audio kb/s ({'/'.join(str(b) for b in spec['Bitrates'])})", def_br, 32, 512)
+    lay_def = '2' if cfg.get('AudioLayout') == 'artist_album' else '1'
+    lay = read_default(f"{pad}Organizzazione: 1=Specchia cartelle (mirror), 2=Aggrega per Artista/Album", lay_def)
+    cfg['AudioLayout'] = 'artist_album' if lay == '2' or lay.lower() == 'artist_album' else 'mirror'
+    cur_sub = cfg['AudioOutDir'] if cfg.get('AudioOutDir') else spec['DefaultDir']
+    sub = read_default(f"{pad}Sottocartella/percorso output", cur_sub)
+    cfg['AudioOutDir'] = '' if sub == spec['DefaultDir'] else sub
+    cov_def = 's' if cfg['OpusCover'] else 'n'
+    cov_ans = read_default(f"{pad}Estrarre/copiare cover.jpeg in ogni cartella album? (s/n)", cov_def)
+    cfg['OpusCover'] = cov_ans.lower().startswith(('s', 'y'))
+    del_def = 's' if cfg['DeleteOriginals'] else 'n'
+    del_ans = read_default(f"{pad}Eliminare i file originali convertiti con successo? (s/n)", del_def)
+    cfg['DeleteOriginals'] = del_ans.lower().startswith(('s', 'y'))
+    if cfg['AudioLayout'] == 'artist_album' and audio_infos:
+        read_audio_fallbacks(audio_infos)
+    save_config()
 
 # ----------------------------------------------------------------------------
 #  BATCH
@@ -1284,8 +1840,9 @@ def start_batch(mode, kind='video'):
         if not has_ffmpeg:
             print_color('ffmpeg/ffprobe non trovati nel PATH: conversione audio non disponibile.', RED)
             wait_enter(); return
-        if not has_opus:
-            print_color('Questa build di ffmpeg non include libopus: conversione audio non disponibile.', RED)
+        if not test_audio_encoder_available(cfg['AudioFormat']):
+            spec_err = get_audio_format_spec(cfg['AudioFormat'])
+            print_color(f"Questa build di ffmpeg non include l'encoder {spec_err['Codec']} ({spec_err['Label']}).", RED)
             wait_enter(); return
     else:
         if not has_ffmpeg:
@@ -1302,80 +1859,155 @@ def start_batch(mode, kind='video'):
 
     files = get_media_files(kind)
     if not files:
-        kind_label = 'JPEG' if is_photo else ('audio (WAV/FLAC)' if is_audio else 'video')
+        kind_label = 'JPEG' if is_photo else ('audio supportato' if is_audio else 'video')
         print_color(f"Nessun file {kind_label} trovato.", YELLOW)
         wait_enter(); return
 
     src_root = cfg['SourceDir'].rstrip('/\\')
-    out_root = get_opus_dir() if is_audio else get_out_dir()
     total_mb = round(sum(f.stat().st_size for f in files) / (1024*1024), 1)
 
-    clear_screen()
-    write_box_top()
-    write_box_line("A V V I O   E L A B O R A Z I O N E   L O T T O", align="Center", color=CYAN)
-    write_box_sep()
-    write_box_line(f"  File da elaborare : {len(files)} ({total_mb} MB)")
-    if is_photo:
-        mode_str = 'solo verifica foto' if mode == 'verify' else ('compressione foto' + (' + verifica + retry' if cfg['PhotoVerify'] else ' (senza verifica)'))
-        write_box_line(f"  Modalita'         : {mode_str}")
-        write_box_line(f"  JPEG              : qualita' {cfg['PhotoQuality']}, {'progressivo' if cfg['PhotoProgressive'] else 'baseline'}", color=GRAY)
-        if cfg['PhotoVerify']:
-            write_box_line(f"  Soglia SSIM       : {cfg['PhotoSsim']:.3f}", color=GRAY)
-    elif is_audio:
-        write_box_line("  Modalita'         : conversione audio -> Opus")
-        write_box_line(f"  Opus              : {cfg['OpusBitrate']} kb/s VBR", color=GRAY)
-        write_box_line("  Metadati          : commenti Vorbis copiati fedelmente", color=GRAY)
-        write_box_line(f"  Copertina         : {'copiata/estratta nella cartella opus' if cfg['OpusCover'] else 'disattivata'}", color=GRAY)
-    else:
-        modes_map = {'compress': 'solo compressione', 'full': 'compressione + verifica VMAF + retry', 'verify': 'solo verifica'}
-        write_box_line(f"  Modalita'         : {modes_map.get(mode, mode)}")
-        if enc:
-            if enc == 'nvenc':
-                enc_desc = f"NVIDIA NVENC (CQ {cfg['NvencCq']}, preset {cfg['NvencPreset']})"
-            elif enc == 'qsv':
-                enc_desc = f"Intel QSV (global_quality {cfg['QsvQuality']})"
-            else:
-                enc_desc = f"x265 (CRF {cfg['X265Crf']}, preset {cfg['X265Preset']})"
-            write_box_line(f"  Encoder           : {enc_desc}", color=GRAY)
-        if mode != 'verify':
-            if cfg['AudioMode'] == 'copy': a_txt = 'copia originale'
-            elif cfg['AudioMode'] == 'aac': a_txt = f"AAC {cfg['AacBitrate']}k"
-            else: a_txt = f"auto (PCM -> AAC {cfg['AacBitrate']}k, altri in copia)"
-            write_box_line(f"  Audio             : {a_txt}", color=GRAY)
-        if mode != 'compress':
-            write_box_line(f"  Soglia VMAF       : {cfg['VmafThreshold']}", color=GRAY)
-            
-    write_box_line(f"  Output            : {out_root}")
-    write_box_bottom()
+    audio_infos = []
+    audio_plan = []
+    fallbacks_asked = False
+    if is_audio:
+        pad = get_box_pad(BOX_WIDTH)
+        print_color(f"\n{pad}Analisi tag e flussi di {len(files)} file audio in corso...", GRAY)
+        audio_infos = [get_audio_info(str(f)) for f in files]
 
-    ans = read_box_prompt("Procedo? (s/n) [s]")
-    if ans and not ans.lower().startswith(('s', 'y')):
-        return
+    while True:
+        out_root = get_opus_dir() if is_audio else get_out_dir()
+        audio_spec = get_audio_format_spec(cfg['AudioFormat']) if is_audio else None
+        if is_audio:
+            fb_artist = cfg.get('AudioFallbackArtist') or 'Unknown'
+            fb_album = cfg.get('AudioFallbackAlbum') or 'Unknown'
+            audio_plan = plan_audio_outputs(audio_infos, src_root, out_root, cfg['AudioLayout'], fb_artist, fb_album, audio_spec['Ext'], cfg['Overwrite'])
+
+        clear_screen()
+        write_box_top()
+        write_box_line("A V V I O   E L A B O R A Z I O N E   L O T T O", align="Center", color=CYAN)
+        write_box_sep()
+        if is_photo:
+            write_box_line(f"  File da elaborare : {len(files)} ({total_mb} MB)")
+            mode_str = 'solo verifica foto' if mode == 'verify' else ('compressione foto' + (' + verifica + retry' if cfg['PhotoVerify'] else ' (senza verifica)'))
+            write_box_line(f"  Modalita'         : {mode_str}")
+            write_box_line(f"  JPEG              : qualita' {cfg['PhotoQuality']}, {'progressivo' if cfg['PhotoProgressive'] else 'baseline'}", color=GRAY)
+            if cfg['PhotoVerify']:
+                write_box_line(f"  Soglia SSIM       : {cfg['PhotoSsim']:.3f}", color=GRAY)
+        elif is_audio:
+            write_audio_summary(audio_infos, src_root)
+            write_box_sep()
+            active_cnt = sum(1 for p in audio_plan if not p.get('Skip'))
+            skip_cnt = len(audio_plan) - active_cnt
+            vbr_str = 'VBR' if audio_spec['Key'] == 'opus' else 'CBR/ABR'
+            lay_str = f"Aggrega per Artista/Album (fallback: '{fb_artist}'/'{fb_album}')" if cfg['AudioLayout'] == 'artist_album' else 'Specchia struttura cartelle (mirror)'
+            write_box_line(f"  Da convertire     : {active_cnt} file" + (f" (saltati: {skip_cnt})" if skip_cnt > 0 else ""))
+            write_box_line(f"  Formato target    : {audio_spec['Label']} ({audio_spec['Ext']}) @ {cfg['OpusBitrate']} kb/s {vbr_str}", color=GREEN)
+            write_box_line(f"  Organizzazione    : {lay_str}", color=GRAY)
+            meta_desc = 'OpusTags nativo (ARTIST multipli separati) + tag' if audio_spec['Key'] == 'opus' else 'tag copiati via ffmpeg (ID3v2 / MP4)'
+            write_box_line(f"  Metadati          : {meta_desc}", color=GRAY)
+            write_box_line(f"  Copertina         : {'cover.jpeg per cartella album (incorporata o da cartella)' if cfg['OpusCover'] else 'disattivata'}", color=GRAY)
+        else:
+            write_box_line(f"  File da elaborare : {len(files)} ({total_mb} MB)")
+            modes_map = {'compress': 'solo compressione', 'full': 'compressione + verifica VMAF + retry', 'verify': 'solo verifica'}
+            write_box_line(f"  Modalita'         : {modes_map.get(mode, mode)}")
+            if enc:
+                if enc == 'nvenc':
+                    enc_desc = f"NVIDIA NVENC (CQ {cfg['NvencCq']}, preset {cfg['NvencPreset']})"
+                elif enc == 'qsv':
+                    enc_desc = f"Intel QSV (global_quality {cfg['QsvQuality']})"
+                else:
+                    enc_desc = f"x265 (CRF {cfg['X265Crf']}, preset {cfg['X265Preset']})"
+                write_box_line(f"  Encoder           : {enc_desc}", color=GRAY)
+            if mode != 'verify':
+                if cfg['AudioMode'] == 'copy': a_txt = 'copia originale'
+                elif cfg['AudioMode'] == 'aac': a_txt = f"AAC {cfg['AacBitrate']}k"
+                else: a_txt = f"auto (PCM -> AAC {cfg['AacBitrate']}k, altri in copia)"
+                write_box_line(f"  Audio             : {a_txt}", color=GRAY)
+            if mode != 'compress':
+                write_box_line(f"  Soglia VMAF       : {cfg['VmafThreshold']}", color=GRAY)
+
+        del_col = YELLOW if cfg['DeleteOriginals'] else GRAY
+        del_txt = 'SI (elimina sorgente dopo conversione OK)' if cfg['DeleteOriginals'] else 'NO (mantieni sorgenti)'
+        write_box_line(f"  Elimina originali : {del_txt}", color=del_col)
+        write_box_line(f"  Output            : {out_root}")
+        write_box_bottom()
+
+        if is_audio:
+            write_audio_dry_run_preview(audio_plan, src_root, out_root)
+            ans = read_box_prompt("Procedo? (s=avvia / m=modifica opzioni audio / n=annulla) [s]")
+            if ans.lower() == 'm':
+                invoke_audio_quick_options(audio_infos)
+                fallbacks_asked = True
+                if not test_audio_encoder_available(cfg['AudioFormat']):
+                    print_color("Encoder non disponibile per il formato scelto, ripristino Opus.", YELLOW)
+                    cfg['AudioFormat'] = 'opus'
+                    save_config()
+                files = get_media_files('audio')
+                audio_infos = [get_audio_info(str(f)) for f in files]
+                total_mb = round(sum(f.stat().st_size for f in files) / (1024*1024), 1) if files else 0
+                continue
+            if ans and not ans.lower().startswith(('s', 'y')):
+                return
+            if cfg['AudioLayout'] == 'artist_album' and not fallbacks_asked and sys.stdin.isatty():
+                fb_artist, fb_album = read_audio_fallbacks(audio_infos)
+                save_config()
+                audio_plan = plan_audio_outputs(audio_infos, src_root, out_root, cfg['AudioLayout'], fb_artist, fb_album, audio_spec['Ext'], cfg['Overwrite'])
+            break
+        else:
+            ans = read_box_prompt("Procedo? (s/n) [s]")
+            if ans and not ans.lower().startswith(('s', 'y')):
+                return
+            break
 
     os.makedirs(out_root, exist_ok=True)
     results = []
+    deleted_count = 0
+    not_deleted = 0
     start_t = time.time()
-    
-    for i, f in enumerate(files, 1):
-        write_centered_progress(current=i, total=len(files), file_name=f.name)
-        if is_photo:
-            r = invoke_photo_job(f, mode, src_root, out_root)
-        elif is_audio:
-            r = invoke_audio_job(f, src_root, out_root)
+
+    total_items = len(audio_plan) if is_audio else len(files)
+    for idx in range(total_items):
+        if is_audio:
+            item = audio_plan[idx]
+            a_info = item['Info']
+            a_dst = item['Dst']
+            f = a_info['Path']
+            write_centered_progress(current=idx + 1, total=total_items, file_name=f.name)
+            r = invoke_audio_job(f, src_root, out_root, dst_path=a_dst, info=a_info, skip=item.get('Skip', False), skip_reason=item.get('Reason', ''))
         else:
-            r = invoke_video_job(f, mode, enc, src_root, out_root)
+            f = files[idx]
+            write_centered_progress(current=idx + 1, total=total_items, file_name=f.name)
+            if is_photo:
+                r = invoke_photo_job(f, mode, src_root, out_root)
+            else:
+                r = invoke_video_job(f, mode, enc, src_root, out_root)
+
+        if mode != 'verify' and cfg['DeleteOriginals']:
+            if r['Status'] in ('OK', 'COMPRESSO (non verificato)'):
+                src_to_del = r[' _SrcPath'] if ' _SrcPath' in r else r.get('_SrcPath', str(f))
+                dst_created = r.get('_DstPath') or os.path.join(out_root, str(f)[len(src_root):].lstrip('/\\'))
+                if remove_source_file(src_to_del, dst_created):
+                    deleted_count += 1
+                    r['Status'] = f"{r['Status']} (orig. eliminato)"
+                else:
+                    not_deleted += 1
+            else:
+                not_deleted += 1
+
+        r.pop('_SrcPath', None)
+        r.pop('_DstPath', None)
         results.append(r)
-        
+
         st = r['Status']
         if 'OK' in st or 'COMPRESS' in st: color = GREEN
         elif 'ESISTENTE' in st or 'GIA' in st: color = GRAY
         else: color = YELLOW
-            
+
         if is_photo: m_txt = f"SSIM={r['SSIM']}  meta={r['Meta']}"
-        elif is_audio: m_txt = f"tags={r['Tags']}  cover={r['Cover']}"
+        elif is_audio: m_txt = f"fmt={r['Formato']}  tags={r['Tags']}  cover={r['Cover']}"
         else: m_txt = f"VMAF={r['VMAF']}"
         print_color(f"   -> {r['Status']}  {r['InMB']} -> {r['OutMB']} MB  (-{r['Saved']}%)  {m_txt}", color)
-        
+
     elapsed = time.time() - start_t
 
     print()
@@ -1386,7 +2018,7 @@ def start_batch(mode, kind='video'):
     if is_photo:
         cols = ['File', 'InMB', 'OutMB', 'Saved', 'Quality', 'SSIM', 'Meta', 'Status']
     elif is_audio:
-        cols = ['File', 'InMB', 'OutMB', 'Saved', 'Bitrate', 'Tags', 'Cover', 'Status']
+        cols = ['File', 'InMB', 'OutMB', 'Saved', 'Formato', 'Bitrate', 'Tags', 'Cover', 'Status']
     else:
         cols = ['File', 'InMB', 'OutMB', 'Saved', 'Quality', 'VMAF', 'Audio', 'Status']
     print(format_table(results, cols))
@@ -1400,7 +2032,10 @@ def start_batch(mode, kind='video'):
         m = int((elapsed % 3600) // 60)
         s = int(elapsed % 60)
         time_str = f"{h:02d}:{m:02d}:{s:02d}"
-        print_color(f"\nTotale: {in_tot:.1f} MB -> {out_tot:.1f} MB  (risparmio {saved_pct:.0f}%)  in {time_str}", GREEN)
+        del_msg = f"  |  Originali eliminati: {deleted_count}" if deleted_count > 0 else ""
+        if cfg['DeleteOriginals'] and not_deleted > 0:
+            del_msg += f" ({not_deleted} mantenuti)"
+        print_color(f"\nTotale: {in_tot:.1f} MB -> {out_tot:.1f} MB  (risparmio {saved_pct:.0f}%)  in {time_str}{del_msg}", GREEN)
     bad = [r for r in results if re.search(r'SOTTO|ERRORE|non letto|MANCA|METADATI', r['Status'])]
     if bad:
         print_color(f"\nDA CONTROLLARE ({len(bad)}):", YELLOW)
@@ -1409,7 +2044,7 @@ def start_batch(mode, kind='video'):
         if is_photo:
             print_color("Per i 'SOTTO SOGLIA': alza la qualita' foto in [6] (es. 93) o tieni l'originale.", YELLOW)
         elif is_audio:
-            print_color("Per gli errori: controlla il file sorgente con [2] o l'installazione di ffmpeg/libopus.", YELLOW)
+            print_color("Per gli errori: controlla il file sorgente con [2] o l'installazione di ffmpeg.", YELLOW)
         else:
             print_color("Per i 'SOTTO SOGLIA': abbassa la qualita' numerica (es. 21) in [6] o tieni l'originale.", YELLOW)
 
@@ -1472,18 +2107,30 @@ def show_scan():
         print_color("Nota: le foto con 'Q stimata' <= qualita' foto impostata vengono saltate (gia' compresse).", GRAY)
 
     if auds:
-        print_color("\nAUDIO (WAV / FLAC)", CYAN)
+        print_color("\nAUDIO (Libreria musicale / Audio)", CYAN)
         rows = []
+        infos = []
         for f in auds:
+            ai = get_audio_info(str(f))
+            infos.append(ai)
             mb = round(f.stat().st_size / (1024*1024), 1)
+            codec_lbl = (ai['Codec'] or f.suffix.lstrip('.')).upper()
+            if ai['BitsPerSample']:
+                codec_lbl = f"{codec_lbl} {ai['BitsPerSample']}b"
             rows.append({
                 'File': f.name,
                 'MB': mb,
-                'Formato': f.suffix.upper().lstrip('.')
+                'Codec': codec_lbl,
+                'kHz': format_sample_rate(ai['SampleRate']),
+                'Durata': format_duration(ai['Duration']),
+                'Artista': ai['AlbumArtist'] or ai['Artist'] or ('Various Artists' if ai['Compilation'] else '-'),
+                'Album': ai['Album'] or '-',
+                'Cover': 'incorporata' if ai['HasEmbeddedCover'] else ('cartella' if find_folder_cover(f.parent) else '-')
             })
-        print(format_table(rows, ['File', 'MB', 'Formato']))
+        print(format_table(rows, ['File', 'MB', 'Codec', 'kHz', 'Durata', 'Artista', 'Album', 'Cover']))
         tot_mb = sum(f.stat().st_size for f in auds) / (1024*1024)
-        print(f"Totale audio: {len(auds)} file, {tot_mb:.1f} MB")
+        tot_dur = sum(x['Duration'] for x in infos)
+        print(f"Totale audio: {len(auds)} file, {tot_mb:.1f} MB, durata {format_duration(tot_dur)}")
         
     wait_enter()
 
@@ -1780,15 +2427,20 @@ def show_settings_menu():
         write_box_line(f"   [I] JPEG progressivo      : {format_on_off(cfg['PhotoProgressive'])}")
         write_box_line(f"   [J] Verifica foto         : {format_on_off(cfg['PhotoVerify'])}  (SSIM + confronto metadati)")
 
-        write_box_line("  AUDIO", color=CYAN)
+        a_spec = get_audio_format_spec(cfg['AudioFormat'])
+        a_lay_txt = 'Artista/Album (aggregato)' if cfg['AudioLayout'] == 'artist_album' else 'mirror (specchia cartelle)'
+        write_box_line("  AUDIO (Opus focus • M4A / AAC / MP3 • musNav)", color=CYAN)
         write_box_line(f"   [C] Audio video           : {cfg['AudioMode']}  (auto: PCM->AAC, altri in copia)")
-        write_box_line(f"   [D] Bitrate AAC           : {cfg['AacBitrate']} kb/s")
-        write_box_line(f"   [K] Bitrate Opus          : {cfg['OpusBitrate']} kb/s (WAV/FLAC -> Opus)")
-        write_box_line(f"   [L] Copertina audio       : {format_on_off(cfg['OpusCover'])}  (copia/estrai cover in opus/)")
+        write_box_line(f"   [D] Bitrate AAC video     : {cfg['AacBitrate']} kb/s")
+        write_box_line(f"   [Q] Formato audio [10]    : {cfg['AudioFormat']}  ({a_spec['Label']} • opus | m4a | aac | mp3)")
+        write_box_line(f"   [K] Bitrate audio [10]    : {cfg['OpusBitrate']} kb/s (VBR per Opus)")
+        write_box_line(f"   [R] Organizzazione audio  : {a_lay_txt}")
+        write_box_line(f"   [L] Copertina audio       : {format_on_off(cfg['OpusCover'])}  (cover.jpeg in ogni cartella album)")
 
         write_box_line("  GENERALE E SOTTOCARTELLE", color=CYAN)
         write_box_line(f"   [A] Includi sottocartelle : {format_on_off(cfg['Recurse'])}")
         write_box_line(f"   [B] Sovrascrivi output    : {format_on_off(cfg['Overwrite'])}")
+        write_box_line(f"   [O] Elimina originali     : {format_on_off(cfg['DeleteOriginals'])}  (dopo conversione riuscita)")
         write_box_line(f"   [M] Conserva date file    : {format_on_off(cfg['PreserveDates'])}")
         out_str = cfg['OutDir'] if cfg['OutDir'] else '<sorgente>/out'
         write_box_line(f"   [N] Cartella output       : {out_str}")
@@ -1830,6 +2482,8 @@ def show_settings_menu():
             cfg['Recurse'] = not cfg['Recurse']
         elif c == 'B':
             cfg['Overwrite'] = not cfg['Overwrite']
+        elif c == 'O':
+            cfg['DeleteOriginals'] = not cfg['DeleteOriginals']
         elif c == 'M':
             cfg['PreserveDates'] = not cfg['PreserveDates']
         elif c == 'N':
@@ -1861,8 +2515,19 @@ def show_settings_menu():
             cfg['PhotoProgressive'] = not cfg['PhotoProgressive']
         elif c == 'J':
             cfg['PhotoVerify'] = not cfg['PhotoVerify']
+        elif c == 'Q':
+            prev_af = cfg['AudioFormat']
+            af = read_default('Formato audio (opus / m4a / aac / mp3)', cfg['AudioFormat']).lower()
+            if af in ['opus', 'm4a', 'aac', 'mp3']:
+                cfg['AudioFormat'] = af
+                nsp = get_audio_format_spec(af)
+                if af != prev_af and int(cfg['OpusBitrate']) not in nsp['Bitrates']:
+                    cfg['OpusBitrate'] = nsp['DefaultBitrate']
         elif c == 'K':
-            cfg['OpusBitrate'] = read_int_range('Bitrate Opus kb/s', cfg['OpusBitrate'], 128, 512)
+            nsp = get_audio_format_spec(cfg['AudioFormat'])
+            cfg['OpusBitrate'] = read_int_range(f"Bitrate audio kb/s ({'/'.join(str(b) for b in nsp['Bitrates'])})", cfg['OpusBitrate'], 32, 512)
+        elif c == 'R':
+            cfg['AudioLayout'] = 'mirror' if cfg['AudioLayout'] == 'artist_album' else 'artist_album'
         elif c == 'L':
             cfg['OpusCover'] = not cfg['OpusCover']
         elif c == 'P':
@@ -1940,18 +2605,23 @@ def show_main_menu():
         write_box_badged_line('Foto', photo_badge, photo_col, photo_detail)
 
         # Status badge 5: Audio
-        audio_ok = (has_ffmpeg and has_opus)
-        audio_badge = 'OK' if audio_ok else 'NO'
+        a_spec = get_audio_format_spec(cfg['AudioFormat'])
+        audio_ok = test_audio_encoder_available(cfg['AudioFormat'])
+        audio_badge = a_spec['Key'].upper() if audio_ok else 'NO'
         audio_col = GREEN if audio_ok else GRAY
-        if not has_ffmpeg: audio_detail = "ffmpeg non trovato"
-        elif not has_opus: audio_detail = "libopus non disponibile in ffmpeg"
-        else: audio_detail = f"WAV/FLAC -> Opus {cfg['OpusBitrate']} kb/s • Cover {format_on_off(cfg['OpusCover'])}"
+        if not has_ffmpeg:
+            audio_detail = "ffmpeg non trovato"
+        elif not audio_ok:
+            audio_detail = f"Encoder {a_spec['Codec']} non disponibile in ffmpeg"
+        else:
+            lay_lbl = 'Artista/Album' if cfg['AudioLayout'] == 'artist_album' else 'mirror'
+            audio_detail = f"{a_spec['Label']} {cfg['OpusBitrate']} kb/s • {lay_lbl} • Cover {format_on_off(cfg['OpusCover'])}"
         write_box_badged_line('Audio', audio_badge, audio_col, audio_detail)
 
         write_box_sep()
         write_box_line("  CARTELLA E ANALISI", color=CYAN)
         write_box_line("   [1] Scegli cartella sorgente (trascina o premi Invio per sfogliare)")
-        write_box_line("   [2] Analizza cartella (elenco video, foto e audio)")
+        write_box_line("   [2] Analizza cartella (elenco video, foto e libreria audio)")
 
         write_box_line("  VIDEO (HEVC + VMAF)", color=CYAN)
         write_box_line("   [3] Comprimi VIDEO (solo compressione)")
@@ -1964,8 +2634,8 @@ def show_main_menu():
         write_box_line("   [8] Solo verifica FOTO (output gia' presenti)")
         write_box_line("   [9] Test qualita' su una FOTO (confronto di piu' valori Q)")
 
-        write_box_line("  AUDIO (WAV/FLAC -> Opus)", color=CYAN)
-        write_box_line("   [10] Comprimi AUDIO (WAV/FLAC -> Opus con tag e copertina)")
+        write_box_line("  AUDIO (Opus focus • M4A / AAC / MP3 • aggregazione musNav)", color=CYAN)
+        write_box_line("   [10] Converti / aggrega AUDIO (Opus/M4A/AAC/MP3, tag, cover, Artista/Album)")
 
         write_box_line("  SISTEMA", color=CYAN)
         write_box_two_col("   [6] Impostazioni", "[0] Salva ed esci  ", left_color=CYAN, right_color=GRAY)

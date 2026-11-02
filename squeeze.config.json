@@ -1,5 +1,5 @@
-﻿{
-    "SourceDir":  "",
+{
+    "SourceDir":  "C:\\Users\\thoma\\Downloads\\Telegram Desktop",
     "OutDir":  "",
     "Recurse":  false,
     "Encoder":  "auto",
@@ -24,7 +24,7 @@
                         ".xmp"
                     ],
     "PhotoQuality":  90,
-    "PhotoSsim":  0.99,
+    "PhotoSsim":  0.98,
     "PhotoProgressive":  true,
     "PhotoVerify":  true,
     "PhotoExtensions":  [
@@ -35,7 +35,7 @@
                        ".mp4",
                        ".mov"
                    ],
-    "OpusBitrate":  160,
+    "OpusBitrate":  192,
     "OpusCover":  true,
     "OpusExtensions":  [
                            ".wav",
